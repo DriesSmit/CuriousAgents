@@ -1,0 +1,9 @@
+jax>=0.4.6
+jaxlib>=0.4.6
+gymnax
+evosax
+distrax
+optax
+flax
+numpy
+brax
