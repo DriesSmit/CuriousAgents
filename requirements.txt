@@ -7,3 +7,4 @@ optax
 flax
 numpy
 brax
+dm-haiku==0.0.9
