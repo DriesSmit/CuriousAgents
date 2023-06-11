@@ -172,7 +172,7 @@ class PPOAgent():
         )
 
         return runner_state
-
+    
     def _update_step(self, runner_state, unused):
         # COLLECT TRAJECTORIES
         def _env_step(runner_state, unused):
@@ -370,14 +370,14 @@ class PPOAgent():
         return runner_state, metric["returned_episode_returns"]
 
     def run(self, runner_state, external_rewards=True, steps=10000, evaluation=False):
-
         # TRAIN LOOP
         # 5e5 steps
-        if external_rewards:
-            num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
-            runner_state, epi_returns = jax.jit(jax.lax.scan(
-                self._update_step, runner_state, None, length=num_updates
-            ))
-        else:
-            epi_returns = 0.0
+        if not external_rewards:
+            return runner_state, 0.0
+        
+        num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
+        scan_fn = lambda runner_state: jax.lax.scan(
+            self._update_step, runner_state, None, length=num_updates
+        )
+        runner_state, epi_returns = jax.jit(scan_fn)(runner_state)
         return runner_state, epi_returns

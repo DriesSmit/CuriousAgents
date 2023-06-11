@@ -3,9 +3,9 @@ from curious_agents.loggers.terminal import Logger
 import jax
 def main() -> None:
     # Hyperparameters
-    explore_first = False
-    pre_training_steps = 100000
-    fine_tuning_steps = 100000
+    explore_first = True
+    pre_training_steps = 1000
+    fine_tuning_steps = 1000
     seed = 1234
 
     # Setup the environment
