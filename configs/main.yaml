@@ -1,5 +1,5 @@
 defaults:
-  - agent: ppo_world_model
+  - agent: ppo_ff_world_model
 
 name: CuriousAgents
 env_name: CartPole-v1

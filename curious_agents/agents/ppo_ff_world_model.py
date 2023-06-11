@@ -6,80 +6,51 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 import optax
-import time
 from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, NamedTuple, Any, Dict
+from typing import Sequence, NamedTuple, Any
 from flax.training.train_state import TrainState
 import distrax
 import gymnax
-import functools
-from gymnax.environments import spaces
-from curious_agents.environments.wrappers import FlattenObservationWrapper, LogWrapper
+from curious_agents.environments.wrappers import LogWrapper, FlattenObservationWrapper
 
 
-class ScannedRNN(nn.Module):
-    @functools.partial(
-        nn.scan,
-        variable_broadcast="params",
-        in_axes=0,
-        out_axes=0,
-        split_rngs={"params": False},
-    )
-    @nn.compact
-    def __call__(self, carry, x):
-        """Applies the module."""
-        rnn_state = carry
-        ins, resets = x
-        rnn_state = jnp.where(
-            resets[:, np.newaxis],
-            self.initialize_carry(ins.shape[0], ins.shape[1]),
-            rnn_state,
-        )
-        new_rnn_state, y = nn.GRUCell()(rnn_state, ins)
-        return new_rnn_state, y
-
-    @staticmethod
-    def initialize_carry(batch_size, hidden_size):
-        # Use a dummy key since the default state init fn is just zeros.
-        return nn.GRUCell.initialize_carry(
-            jax.random.PRNGKey(0), (batch_size,), hidden_size
-        )
-
-
-class ActorCriticRNN(nn.Module):
+class ActorCritic(nn.Module):
     action_dim: Sequence[int]
-    config: Dict
+    activation: str = "tanh"
 
     @nn.compact
-    def __call__(self, hidden, x):
-        obs, dones = x
-        embedding = nn.Dense(
-            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        embedding = nn.relu(embedding)
-
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
-
-        actor_mean = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
-            embedding
-        )
-        actor_mean = nn.relu(actor_mean)
+    def __call__(self, x):
+        if self.activation == "relu":
+            activation = nn.relu
+        else:
+            activation = nn.tanh
+        actor_mean = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(x)
+        actor_mean = activation(actor_mean)
+        actor_mean = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(actor_mean)
+        actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
-
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
-            embedding
-        )
-        critic = nn.relu(critic)
+        critic = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(x)
+        critic = activation(critic)
+        critic = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(critic)
+        critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )
 
-        return hidden, pi, jnp.squeeze(critic, axis=-1)
+        return pi, jnp.squeeze(critic, axis=-1)
+    
 
 
 class Transition(NamedTuple):
@@ -91,12 +62,14 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     info: jnp.ndarray
 
+
 class PPOAgent():
     def __init__(self, env_name) -> None:
         self._config = {
         "LR": 2.5e-4,
         "NUM_ENVS": 4,
         "NUM_STEPS": 128,
+        "TOTAL_TIMESTEPS": 5e5,
         "UPDATE_EPOCHS": 4,
         "NUM_MINIBATCHES": 4,
         "GAMMA": 0.99,
@@ -105,10 +78,11 @@ class PPOAgent():
         "ENT_COEF": 0.01,
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
-        "ENV_NAME": env_name,
+        "ACTIVATION": "tanh",
+        "ENV_NAME": "CartPole-v1",
         "ANNEAL_LR": True,
         "DEBUG": True,
-        }
+    }
         self._config["MINIBATCH_SIZE"] = (
             self._config["NUM_ENVS"] * self._config["NUM_STEPS"] // self._config["NUM_MINIBATCHES"]
         )
@@ -117,7 +91,9 @@ class PPOAgent():
         self._env = LogWrapper(self._env)
 
         # INIT NETWORK
-        self._network = ActorCriticRNN(self._env.action_space(self._env_params).n, config=self._config)
+        self._network = ActorCritic(
+            self._env.action_space(self._env_params).n, activation=self._config["ACTIVATION"]
+        )
         
 
     def init_state(self, rng):
@@ -130,15 +106,10 @@ class PPOAgent():
             frac = 1.0
             return self._config["LR"] * frac
         
+        #
         rng, _rng = jax.random.split(rng)
-        init_x = (
-            jnp.zeros(
-                (1, self._config["NUM_ENVS"], *self._env.observation_space(self._env_params).shape)
-            ),
-            jnp.zeros((1, self._config["NUM_ENVS"])),
-        )
-        init_hstate = ScannedRNN.initialize_carry(self._config["NUM_ENVS"], 128)
-        network_params = self._network.init(_rng, init_hstate, init_x)
+        init_x = jnp.zeros(self._env.observation_space(self._env_params).shape)
+        network_params = self._network.init(_rng, init_x)
         if self._config["ANNEAL_LR"]:
             tx = optax.chain(
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
@@ -159,36 +130,20 @@ class PPOAgent():
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
         obsv, env_state = jax.vmap(self._env.reset, in_axes=(0, None))(reset_rng, self._env_params)
-        init_hstate = ScannedRNN.initialize_carry(self._config["NUM_ENVS"], 128)
 
-        rng, _rng = jax.random.split(rng)
-        runner_state = (
-            train_state,
-            env_state,
-            obsv,
-            jnp.zeros((self._config["NUM_ENVS"]), dtype=bool),
-            init_hstate,
-            _rng,
-        )
-
-        return runner_state
+        return (train_state, env_state, obsv, rng)
     
-    def _update_step(self, runner_state, unused):
+    # TRAIN LOOP
+    def _update_step(self, external_rewards, runner_state, unused):
         # COLLECT TRAJECTORIES
         def _env_step(runner_state, unused):
-            train_state, env_state, last_obs, last_done, hstate, rng = runner_state
-            rng, _rng = jax.random.split(rng)
+            train_state, env_state, last_obs, rng = runner_state
 
             # SELECT ACTION
-            ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-            hstate, pi, value = self._network.apply(train_state.params, hstate, ac_in)
+            rng, _rng = jax.random.split(rng)
+            pi, value = self._network.apply(train_state.params, last_obs)
             action = pi.sample(seed=_rng)
             log_prob = pi.log_prob(action)
-            value, action, log_prob = (
-                value.squeeze(0),
-                action.squeeze(0),
-                log_prob.squeeze(0),
-            )
 
             # STEP ENV
             rng, _rng = jax.random.split(rng)
@@ -196,23 +151,23 @@ class PPOAgent():
             obsv, env_state, reward, done, info = jax.vmap(
                 self._env.step, in_axes=(0, 0, 0, None)
             )(rng_step, env_state, action, self._env_params)
+
+            # Optionally zero out external rewards
+            reward = external_rewards*reward
+
             transition = Transition(
                 done, action, value, reward, log_prob, last_obs, info
             )
-            runner_state = (train_state, env_state, obsv, done, hstate, rng)
+            runner_state = (train_state, env_state, obsv, rng)
             return runner_state, transition
 
-        initial_hstate = runner_state[-2]
         runner_state, traj_batch = jax.lax.scan(
             _env_step, runner_state, None, self._config["NUM_STEPS"]
         )
 
         # CALCULATE ADVANTAGE
-        train_state, env_state, last_obs, last_done, hstate, rng = runner_state
-        ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-        _, _, last_val = self._network.apply(train_state.params, hstate, ac_in)
-        last_val = last_val.squeeze(0)
-        last_val = jnp.where(last_done, jnp.zeros_like(last_val), last_val)
+        train_state, env_state, last_obs, rng = runner_state
+        _, last_val = self._network.apply(train_state.params, last_obs)
 
         def _calculate_gae(traj_batch, last_val):
             def _get_advantages(gae_and_next_value, transition):
@@ -243,13 +198,11 @@ class PPOAgent():
         # UPDATE NETWORK
         def _update_epoch(update_state, unused):
             def _update_minbatch(train_state, batch_info):
-                init_hstate, traj_batch, advantages, targets = batch_info
+                traj_batch, advantages, targets = batch_info
 
-                def _loss_fn(params, init_hstate, traj_batch, gae, targets):
+                def _loss_fn(params, traj_batch, gae, targets):
                     # RERUN NETWORK
-                    _, pi, value = self._network.apply(
-                        params, init_hstate[0], (traj_batch.obs, traj_batch.done)
-                    )
+                    pi, value = self._network.apply(params, traj_batch.obs)
                     log_prob = pi.log_prob(traj_batch.action)
 
                     # CALCULATE VALUE LOSS
@@ -287,63 +240,38 @@ class PPOAgent():
 
                 grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
                 total_loss, grads = grad_fn(
-                    train_state.params, init_hstate, traj_batch, advantages, targets
+                    train_state.params, traj_batch, advantages, targets
                 )
                 train_state = train_state.apply_gradients(grads=grads)
                 return train_state, total_loss
 
-            (
-                train_state,
-                init_hstate,
-                traj_batch,
-                advantages,
-                targets,
-                rng,
-            ) = update_state
-
+            train_state, traj_batch, advantages, targets, rng = update_state
             rng, _rng = jax.random.split(rng)
-            permutation = jax.random.permutation(_rng, self._config["NUM_ENVS"])
-            batch = (init_hstate, traj_batch, advantages, targets)
-
-            shuffled_batch = jax.tree_util.tree_map(
-                lambda x: jnp.take(x, permutation, axis=1), batch
+            batch_size = self._config["MINIBATCH_SIZE"] * self._config["NUM_MINIBATCHES"]
+            assert (
+                batch_size == self._config["NUM_STEPS"] * self._config["NUM_ENVS"]
+            ), "batch size must be equal to number of steps * number of envs"
+            permutation = jax.random.permutation(_rng, batch_size)
+            batch = (traj_batch, advantages, targets)
+            batch = jax.tree_util.tree_map(
+                lambda x: x.reshape((batch_size,) + x.shape[2:]), batch
             )
-
+            shuffled_batch = jax.tree_util.tree_map(
+                lambda x: jnp.take(x, permutation, axis=0), batch
+            )
             minibatches = jax.tree_util.tree_map(
-                lambda x: jnp.swapaxes(
-                    jnp.reshape(
-                        x,
-                        [x.shape[0], self._config["NUM_MINIBATCHES"], -1]
-                        + list(x.shape[2:]),
-                    ),
-                    1,
-                    0,
+                lambda x: jnp.reshape(
+                    x, [self._config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
                 ),
                 shuffled_batch,
             )
-
             train_state, total_loss = jax.lax.scan(
                 _update_minbatch, train_state, minibatches
             )
-            update_state = (
-                train_state,
-                init_hstate,
-                traj_batch,
-                advantages,
-                targets,
-                rng,
-            )
+            update_state = (train_state, traj_batch, advantages, targets, rng)
             return update_state, total_loss
 
-        init_hstate = initial_hstate[None, :]  # TBH
-        update_state = (
-            train_state,
-            init_hstate,
-            traj_batch,
-            advantages,
-            targets,
-            rng,
-        )
+        update_state = (train_state, traj_batch, advantages, targets, rng)
         update_state, loss_info = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )
@@ -351,33 +279,23 @@ class PPOAgent():
         metric = traj_batch.info
         rng = update_state[-1]
         if self._config.get("DEBUG"):
-
             def callback(info):
-                return_values = info["returned_episode_returns"][
-                    info["returned_episode"]
-                ]
-                timesteps = (
-                    info["timestep"][info["returned_episode"]] * self._config["NUM_ENVS"]
-                )
+                return_values = info["returned_episode_returns"][info["returned_episode"]]
+                timesteps = info["timestep"][info["returned_episode"]] * self._config["NUM_ENVS"]
                 for t in range(len(timesteps)):
-                    print(
-                        f"global step={timesteps[t]}, episodic return={return_values[t]}"
-                    )
-
+                    print(f"global step={timesteps[t]}, episodic return={return_values[t]}")
             jax.debug.callback(callback, metric)
 
-        runner_state = (train_state, env_state, last_obs, last_done, hstate, rng)
+        runner_state = (train_state, env_state, last_obs, rng)
         return runner_state, metric["returned_episode_returns"]
 
     def run(self, runner_state, external_rewards=True, steps=10000, evaluation=False):
         # TRAIN LOOP
         # 5e5 steps
-        if not external_rewards:
-            return runner_state, 0.0
-        
         num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
+        update_fn = lambda runner_state, unused: self._update_step(external_rewards, runner_state, unused)
         scan_fn = lambda runner_state: jax.lax.scan(
-            self._update_step, runner_state, None, length=num_updates
+            update_fn, runner_state, None, length=num_updates
         )
         runner_state, epi_returns = jax.jit(scan_fn)(runner_state)
         return runner_state, epi_returns
