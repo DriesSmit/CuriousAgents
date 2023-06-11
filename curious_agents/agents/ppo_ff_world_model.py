@@ -12,7 +12,26 @@ from flax.training.train_state import TrainState
 import distrax
 import gymnax
 from curious_agents.environments.wrappers import LogWrapper, FlattenObservationWrapper
+from os.path import join
 
+class TensorBoardLogger:
+    def __init__(self, log_dir):
+        from tensorboardX import SummaryWriter
+
+        self._summary_writer = SummaryWriter(
+            logdir=join(log_dir, "tensorboard"), max_queue=1, flush_secs=1
+        )
+        self._step = 0
+
+    def write(self, name, value, step=None):
+        self._summary_writer.add_scalar(
+                tag=name,
+                scalar_value=value,
+                global_step= step if step else self._step,
+            )
+        
+        if step is None:
+            self._step += 1
 
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
@@ -51,7 +70,34 @@ class ActorCritic(nn.Module):
 
         return pi, jnp.squeeze(critic, axis=-1)
     
+class WorldModel(nn.Module):
+    action_dim: Sequence[int]
+    activation: str = "tanh"
 
+    @nn.compact
+    def __call__(self, x, action):
+        if self.activation == "relu":
+            activation = nn.relu
+        else:
+            activation = nn.tanh
+
+        # One-hot encode the action
+        one_hot_action = jax.nn.one_hot(action, self.action_dim)
+
+        inp = jnp.concatenate([x, one_hot_action], axis=-1)
+
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(inp)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(layer_out)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(x.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            layer_out
+        )
+        return layer_out
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -60,6 +106,7 @@ class Transition(NamedTuple):
     reward: jnp.ndarray
     log_prob: jnp.ndarray
     obs: jnp.ndarray
+    next_obs: jnp.ndarray
     info: jnp.ndarray
 
 
@@ -79,7 +126,7 @@ class PPOAgent():
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
-        "ENV_NAME": "CartPole-v1",
+        "ENV_NAME": env_name,
         "ANNEAL_LR": True,
         "DEBUG": True,
     }
@@ -90,10 +137,18 @@ class PPOAgent():
         self._env = FlattenObservationWrapper(self._env)
         self._env = LogWrapper(self._env)
 
-        # INIT NETWORK
-        self._network = ActorCritic(
+        # INIT NETWORKS
+        self._policy_network = ActorCritic(
             self._env.action_space(self._env_params).n, activation=self._config["ACTIVATION"]
         )
+
+        # INIT NETWORK
+        self._world_model = WorldModel(
+            self._env.action_space(self._env_params).n, activation=self._config["ACTIVATION"]
+        )
+
+        # INIT LOGGER
+        self._logger = TensorBoardLogger("./logs")
         
 
     def init_state(self, rng):
@@ -108,8 +163,11 @@ class PPOAgent():
         
         #
         rng, _rng = jax.random.split(rng)
-        init_x = jnp.zeros(self._env.observation_space(self._env_params).shape)
-        network_params = self._network.init(_rng, init_x)
+        zero_obs = jnp.zeros(self._env.observation_space(self._env_params).shape)
+        policy_params = self._policy_network.init(_rng, zero_obs)
+        zero_action = jnp.zeros(self._env.action_space(self._env_params).shape, dtype=jnp.int32)
+        wm_params = self._world_model.init(_rng, zero_obs, zero_action)
+
         if self._config["ANNEAL_LR"]:
             tx = optax.chain(
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
@@ -120,9 +178,14 @@ class PPOAgent():
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
                 optax.adam(self._config["LR"], eps=1e-5),
             )
-        train_state = TrainState.create(
-            apply_fn=self._network.apply,
-            params=network_params,
+        policy_train_state = TrainState.create(
+            apply_fn=self._policy_network.apply,
+            params=policy_params,
+            tx=tx,
+        )
+        wm_train_state = TrainState.create(
+            apply_fn=self._world_model.apply,
+            params=wm_params,
             tx=tx,
         )
 
@@ -131,17 +194,17 @@ class PPOAgent():
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
         obsv, env_state = jax.vmap(self._env.reset, in_axes=(0, None))(reset_rng, self._env_params)
 
-        return (train_state, env_state, obsv, rng)
+        return (policy_train_state, wm_train_state, env_state, obsv, rng)
     
     # TRAIN LOOP
-    def _update_step(self, external_rewards, runner_state, unused):
+    def _update_step(self, use_external_rewards, runner_state, unused):
         # COLLECT TRAJECTORIES
         def _env_step(runner_state, unused):
-            train_state, env_state, last_obs, rng = runner_state
+            policy_train_state, wm_train_state, env_state, last_obs, rng = runner_state
 
             # SELECT ACTION
             rng, _rng = jax.random.split(rng)
-            pi, value = self._network.apply(train_state.params, last_obs)
+            pi, value = self._policy_network.apply(policy_train_state.params, last_obs)
             action = pi.sample(seed=_rng)
             log_prob = pi.log_prob(action)
 
@@ -152,13 +215,21 @@ class PPOAgent():
                 self._env.step, in_axes=(0, 0, 0, None)
             )(rng_step, env_state, action, self._env_params)
 
-            # Optionally zero out external rewards
-            reward = external_rewards*reward
+            # Calcuate the distance between the predicted and the actual observation
+            pred_o_t = self._world_model.apply(wm_train_state.params, last_obs, action)
+            dist = jnp.linalg.norm(obsv - pred_o_t, axis=-1)*(1.0-done)
+
+
+            # Calculate the internal reward
+            # TODO: Change this back
+            reward =  dist # jnp.abs(obsv[..., 1]) + done # jnp.square(dist) # - 0.1*jnp.log(jnp.square(dist))
+            # jax.debug.print("reward: {x}", x=reward)
+            # reward = use_external_rewards*reward - (1-use_external_rewards)*jnp.log(jnp.square(dist))
 
             transition = Transition(
-                done, action, value, reward, log_prob, last_obs, info
+                done, action, value, reward, log_prob, last_obs, obsv, info
             )
-            runner_state = (train_state, env_state, obsv, rng)
+            runner_state = (policy_train_state, wm_train_state, env_state, obsv, rng)
             return runner_state, transition
 
         runner_state, traj_batch = jax.lax.scan(
@@ -166,8 +237,8 @@ class PPOAgent():
         )
 
         # CALCULATE ADVANTAGE
-        train_state, env_state, last_obs, rng = runner_state
-        _, last_val = self._network.apply(train_state.params, last_obs)
+        policy_train_state, wm_train_state, env_state, last_obs, rng = runner_state
+        _, last_val = self._policy_network.apply(policy_train_state.params, last_obs)
 
         def _calculate_gae(traj_batch, last_val):
             def _get_advantages(gae_and_next_value, transition):
@@ -198,13 +269,14 @@ class PPOAgent():
         # UPDATE NETWORK
         def _update_epoch(update_state, unused):
             def _update_minbatch(train_state, batch_info):
+                policy_train_state, wm_train_state = train_state
                 traj_batch, advantages, targets = batch_info
 
-                def _loss_fn(params, traj_batch, gae, targets):
-                    # RERUN NETWORK
-                    pi, value = self._network.apply(params, traj_batch.obs)
+                def _agent_loss_fn(params, traj_batch, gae, targets):
+                    # RERUN NETWORKS
+                    pi, value = self._policy_network.apply(params, traj_batch.obs)
                     log_prob = pi.log_prob(traj_batch.action)
-
+                    
                     # CALCULATE VALUE LOSS
                     value_pred_clipped = traj_batch.value + (
                         value - traj_batch.value
@@ -238,14 +310,27 @@ class PPOAgent():
                     )
                     return total_loss, (value_loss, loss_actor, entropy)
 
-                grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
-                total_loss, grads = grad_fn(
-                    train_state.params, traj_batch, advantages, targets
+                grad_fn = jax.value_and_grad(_agent_loss_fn, has_aux=True)
+                pol_loss, grads = grad_fn(
+                    policy_train_state.params, traj_batch, advantages, targets
                 )
-                train_state = train_state.apply_gradients(grads=grads)
-                return train_state, total_loss
+                policy_train_state = policy_train_state.apply_gradients(grads=grads)
 
-            train_state, traj_batch, advantages, targets, rng = update_state
+                # UPDATE THE WORLD MODEL
+                def _wm_loss_fn(params, traj_batch):
+                    # RERUN NETWORK
+                    pred_o_t = self._world_model.apply(params, traj_batch.obs, traj_batch.action)
+                    # CALCULATE WORLD MODEL LOSS
+                    # Don't train on the last step
+                    return (jnp.linalg.norm(traj_batch.next_obs - pred_o_t, axis=-1)*(1.0-traj_batch.done)).mean()
+                grad_fn = jax.value_and_grad(_wm_loss_fn)
+                wm_loss, grads = grad_fn(
+                    wm_train_state.params, traj_batch,
+                )
+                wm_train_state = wm_train_state.apply_gradients(grads=grads)
+                return [policy_train_state, wm_train_state], [pol_loss, wm_loss]
+
+            policy_train_state, wm_train_state, traj_batch, advantages, targets, rng = update_state
             rng, _rng = jax.random.split(rng)
             batch_size = self._config["MINIBATCH_SIZE"] * self._config["NUM_MINIBATCHES"]
             assert (
@@ -265,28 +350,35 @@ class PPOAgent():
                 ),
                 shuffled_batch,
             )
-            train_state, total_loss = jax.lax.scan(
-                _update_minbatch, train_state, minibatches
+            train_state, loss = jax.lax.scan(
+                _update_minbatch, [policy_train_state, wm_train_state], minibatches
             )
-            update_state = (train_state, traj_batch, advantages, targets, rng)
-            return update_state, total_loss
+ 
+            update_state = tuple(train_state) + (traj_batch, advantages, targets, rng)
+            return update_state, loss
 
-        update_state = (train_state, traj_batch, advantages, targets, rng)
-        update_state, loss_info = jax.lax.scan(
+        update_state = (policy_train_state, wm_train_state, traj_batch, advantages, targets, rng)
+        update_state, loss = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )
-        train_state = update_state[0]
+        policy_loss, wm_loss = loss
+        policy_train_state, wm_train_state = update_state[:2]
         metric = traj_batch.info
         rng = update_state[-1]
         if self._config.get("DEBUG"):
             def callback(info):
                 return_values = info["returned_episode_returns"][info["returned_episode"]]
-                timesteps = info["timestep"][info["returned_episode"]] * self._config["NUM_ENVS"]
-                for t in range(len(timesteps)):
-                    print(f"global step={timesteps[t]}, episodic return={return_values[t]}")
+                timesteps = info["timestep"][info["returned_episode"]]
+
+                if len(return_values) > 0:
+                    avg_return = np.mean(return_values, axis=0)
+
+                    for t in range(len(timesteps)):
+                        print(f"global step={timesteps[t]}, episodic return={return_values[t]}")
+                    self._logger.write("avg_return", avg_return, step=timesteps[0])
             jax.debug.callback(callback, metric)
 
-        runner_state = (train_state, env_state, last_obs, rng)
+        runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
         return runner_state, metric["returned_episode_returns"]
 
     def run(self, runner_state, external_rewards=True, steps=10000, evaluation=False):

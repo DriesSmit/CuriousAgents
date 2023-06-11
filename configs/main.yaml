@@ -2,8 +2,8 @@ defaults:
   - agent: ppo_ff_world_model
 
 name: CuriousAgents
-env_name: CartPole-v1
-pre_training_steps: 100000
-fine_tuning_steps: 10000
+env_name: MountainCar-v0 # CartPole-v1
+pre_training_steps: 10000000
+fine_tuning_steps: 0
 seed: 1234
 explore_first: True
