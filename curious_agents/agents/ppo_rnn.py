@@ -97,7 +97,6 @@ class PPOAgent():
         "LR": 2.5e-4,
         "NUM_ENVS": 4,
         "NUM_STEPS": 128,
-        "TOTAL_TIMESTEPS": 5e5,
         "UPDATE_EPOCHS": 4,
         "NUM_MINIBATCHES": 4,
         "GAMMA": 0.99,
@@ -110,10 +109,6 @@ class PPOAgent():
         "ANNEAL_LR": True,
         "DEBUG": True,
         }
-
-        self._config["NUM_UPDATES"] = (
-        self._config["TOTAL_TIMESTEPS"] // self._config["NUM_STEPS"] // self._config["NUM_ENVS"]
-        )
         self._config["MINIBATCH_SIZE"] = (
             self._config["NUM_ENVS"] * self._config["NUM_STEPS"] // self._config["NUM_MINIBATCHES"]
         )
@@ -126,15 +121,15 @@ class PPOAgent():
 
     def init_state(self, rng):
         def linear_schedule(count):
-            frac = (
-                1.0
-                - (count // (self._config["NUM_MINIBATCHES"] * self._config["UPDATE_EPOCHS"]))
-                / self._config["NUM_UPDATES"]
-            )
+            # frac = (
+            #     1.0
+            #     - (count // (self._config["NUM_MINIBATCHES"] * self._config["UPDATE_EPOCHS"]))
+            #     / self._config["NUM_UPDATES"]
+            # )
+            frac = 1.0
             return self._config["LR"] * frac
         
         # INIT NETWORK
-        
         rng, _rng = jax.random.split(rng)
         init_x = (
             jnp.zeros(
@@ -377,7 +372,12 @@ class PPOAgent():
     def run(self, runner_state, external_rewards=True, steps=10000, evaluation=False):
 
         # TRAIN LOOP
-        runner_state, epi_returns = jax.lax.scan(
-            self._update_step, runner_state, None, self._config["NUM_UPDATES"]
-        )
+        # 5e5 steps
+        if external_rewards:
+            num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
+            runner_state, epi_returns = jax.jit(jax.lax.scan(
+                self._update_step, runner_state, None, length=num_updates
+            ))
+        else:
+            epi_returns = 0.0
         return runner_state, epi_returns
