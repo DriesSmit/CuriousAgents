@@ -1,8 +1,20 @@
-import os
-# Write the config to the log directory.
-def write_config_to_logs(cfg: OmegaConf, log_dir: str) -> None:
+from os.path import join
 
-    # Write the config to the log directory.
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    OmegaConf.save(cfg, join(log_dir, "config.yaml"))
+class TensorBoardLogger:
+    def __init__(self, log_dir):
+        from tensorboardX import SummaryWriter
+
+        self._summary_writer = SummaryWriter(
+            logdir=join(log_dir, "tensorboard"), max_queue=1, flush_secs=1
+        )
+        self._step = 0
+
+    def write(self, name, value, step=None):
+        self._summary_writer.add_scalar(
+                tag=name,
+                scalar_value=value,
+                global_step= step if step else self._step,
+            )
+        
+        if step is None:
+            self._step += 1

@@ -7,4 +7,4 @@ build:
 	./ca_env/bin/pip install -r ./requirements.txt
 
 sudo_clean:
-	sudo rm -r ./paila_logs
+	sudo rm -r ./logs

@@ -12,26 +12,7 @@ from flax.training.train_state import TrainState
 import distrax
 import gymnax
 from curious_agents.environments.wrappers import LogWrapper, FlattenObservationWrapper
-from os.path import join
 
-class TensorBoardLogger:
-    def __init__(self, log_dir):
-        from tensorboardX import SummaryWriter
-
-        self._summary_writer = SummaryWriter(
-            logdir=join(log_dir, "tensorboard"), max_queue=1, flush_secs=1
-        )
-        self._step = 0
-
-    def write(self, name, value, step=None):
-        self._summary_writer.add_scalar(
-                tag=name,
-                scalar_value=value,
-                global_step= step if step else self._step,
-            )
-        
-        if step is None:
-            self._step += 1
 
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
@@ -127,7 +108,7 @@ class PPOAgent():
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
         "ENV_NAME": env_name,
-        "ANNEAL_LR": True,
+        "ANNEAL_LR": False,
         "DEBUG": True,
     }
         self._config["MINIBATCH_SIZE"] = (
@@ -148,17 +129,15 @@ class PPOAgent():
         )
 
         # INIT LOGGER
-        self._logger = TensorBoardLogger("./logs")
-        
+        self._logger = None
 
     def init_state(self, rng):
         def linear_schedule(count):
-            # frac = (
-            #     1.0
-            #     - (count // (self._config["NUM_MINIBATCHES"] * self._config["UPDATE_EPOCHS"]))
-            #     / self._config["NUM_UPDATES"]
-            # )
-            frac = 1.0
+            frac = (
+                1.0
+                - (count // (self._config["NUM_MINIBATCHES"] * self._config["UPDATE_EPOCHS"]))
+                / self._config["NUM_UPDATES"]
+            )
             return self._config["LR"] * frac
         
         #
@@ -217,13 +196,14 @@ class PPOAgent():
 
             # Calcuate the distance between the predicted and the actual observation
             pred_o_t = self._world_model.apply(wm_train_state.params, last_obs, action)
-            dist = jnp.linalg.norm(obsv - pred_o_t, axis=-1)*(1.0-done)
+            dist = jnp.linalg.norm(obsv - pred_o_t, axis=-1)
 
 
             # Calculate the internal reward
             # TODO: Change this back
-            reward =  dist # jnp.abs(obsv[..., 1]) + done # jnp.square(dist) # - 0.1*jnp.log(jnp.square(dist))
-            # jax.debug.print("reward: {x}", x=reward)
+            reward =  dist # 0.1*jnp.abs(obsv[..., 1]) + done #dist 
+            # jnp.abs(obsv[..., 1]) + done # jnp.square(dist) # - 0.1*jnp.log(jnp.square(dist))
+            # jax.debug.print("reward: {x}", x=reward, y=log_prob)
             # reward = use_external_rewards*reward - (1-use_external_rewards)*jnp.log(jnp.square(dist))
 
             transition = Transition(
@@ -283,6 +263,8 @@ class PPOAgent():
                     ).clip(-self._config["CLIP_EPS"], self._config["CLIP_EPS"])
                     value_losses = jnp.square(value - targets)
                     value_losses_clipped = jnp.square(value_pred_clipped - targets)
+
+                    # Maximum??
                     value_loss = (
                         0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
                     )
@@ -290,8 +272,8 @@ class PPOAgent():
                     # CALCULATE ACTOR LOSS
                     ratio = jnp.exp(log_prob - traj_batch.log_prob)
                     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
-                    loss_actor1 = ratio * gae
-                    loss_actor2 = (
+                    actor_loss1 = ratio * gae
+                    actor_loss2 = (
                         jnp.clip(
                             ratio,
                             1.0 - self._config["CLIP_EPS"],
@@ -299,16 +281,16 @@ class PPOAgent():
                         )
                         * gae
                     )
-                    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
-                    loss_actor = loss_actor.mean()
-                    entropy = pi.entropy().mean()
+                    actor_loss = -jnp.minimum(actor_loss1, actor_loss2)
+                    actor_loss = actor_loss.mean()
+                    entropy_loss = pi.entropy().mean()
 
                     total_loss = (
-                        loss_actor
+                        actor_loss
                         + self._config["VF_COEF"] * value_loss
-                        - self._config["ENT_COEF"] * entropy
+                        - self._config["ENT_COEF"] * entropy_loss
                     )
-                    return total_loss, (value_loss, loss_actor, entropy)
+                    return total_loss, (value_loss, actor_loss, entropy_loss)
 
                 grad_fn = jax.value_and_grad(_agent_loss_fn, has_aux=True)
                 pol_loss, grads = grad_fn(
@@ -360,30 +342,46 @@ class PPOAgent():
         update_state = (policy_train_state, wm_train_state, traj_batch, advantages, targets, rng)
         update_state, loss = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
-        )
-        policy_loss, wm_loss = loss
+        )   
+      
+        (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss = loss
+        loss_info = {
+            "total_loss": total_loss.mean(),
+            "value_loss": value_loss.mean(),
+            "actor_loss": actor_loss.mean(),
+            "entropy_loss": entropy_loss.mean(),
+            "wm_loss": wm_loss.mean(),
+        }
+         
         policy_train_state, wm_train_state = update_state[:2]
         metric = traj_batch.info
         rng = update_state[-1]
         if self._config.get("DEBUG"):
-            def callback(info):
-                return_values = info["returned_episode_returns"][info["returned_episode"]]
-                timesteps = info["timestep"][info["returned_episode"]]
+            def callback(metric, loss_info):
+                return_values = metric["returned_episode_returns"][metric["returned_episode"]]
+                timesteps = metric["timestep"][metric["returned_episode"]]
 
                 if len(return_values) > 0:
                     avg_return = np.mean(return_values, axis=0)
-
-                    for t in range(len(timesteps)):
-                        print(f"global step={timesteps[t]}, episodic return={return_values[t]}")
+                    # for t in range(len(timesteps)):
+                    print(f"Timestep: {np.mean(timesteps)}. Episodic return={np.mean(return_values)}")
                     self._logger.write("avg_return", avg_return, step=timesteps[0])
-            jax.debug.callback(callback, metric)
+                    self._logger.write("total_loss", loss_info["total_loss"], step=timesteps[0])
+                    self._logger.write("value_loss", loss_info["value_loss"], step=timesteps[0])
+                    self._logger.write("actor_loss", loss_info["actor_loss"], step=timesteps[0])
+                    self._logger.write("entropy_loss", loss_info["entropy_loss"], step=timesteps[0])
+                    self._logger.write("wm_loss", loss_info["wm_loss"], step=timesteps[0])
+            jax.debug.callback(callback, metric, loss_info)
 
         runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
         return runner_state, metric["returned_episode_returns"]
 
-    def run(self, runner_state, external_rewards=True, steps=10000, evaluation=False):
+    def run(self, runner_state, logger, external_rewards=True, steps=10000, evaluation=False):
+
+        # Set the loger
+        self._logger = logger
+
         # TRAIN LOOP
-        # 5e5 steps
         num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
         update_fn = lambda runner_state, unused: self._update_step(external_rewards, runner_state, unused)
         scan_fn = lambda runner_state: jax.lax.scan(
