@@ -1,17 +1,19 @@
 # Adapted from https://github.com/luchris429/purejaxrl/blob/main/purejaxrl/ppo_rnn.py
 # Please visit the repo above and support the authors.
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 import optax
 from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, NamedTuple, Any
+from typing import Sequence, NamedTuple
 from flax.training.train_state import TrainState
 import distrax
 import gymnax
+from gymnax.visualize import Visualizer
 from curious_agents.environments.wrappers import LogWrapper, FlattenObservationWrapper
+from dataclasses import asdict
+
 
 
 class ActorCritic(nn.Module):
@@ -175,10 +177,7 @@ class PPOAgent():
 
         return (policy_train_state, wm_train_state, env_state, obsv, rng)
     
-    # TRAIN LOOP
-    def _update_step(self, use_external_rewards, runner_state, unused):
-        # COLLECT TRAJECTORIES
-        def _env_step(runner_state, unused):
+    def _env_step(self, runner_state, unused):
             policy_train_state, wm_train_state, env_state, last_obs, rng = runner_state
 
             # SELECT ACTION
@@ -190,7 +189,7 @@ class PPOAgent():
             # STEP ENV
             rng, _rng = jax.random.split(rng)
             rng_step = jax.random.split(_rng, self._config["NUM_ENVS"])
-            obsv, env_state, reward, done, info = jax.vmap(
+            obsv, env_state, original_reward, done, info = jax.vmap(
                 self._env.step, in_axes=(0, 0, 0, None)
             )(rng_step, env_state, action, self._env_params)
 
@@ -210,10 +209,13 @@ class PPOAgent():
                 done, action, value, reward, log_prob, last_obs, obsv, info
             )
             runner_state = (policy_train_state, wm_train_state, env_state, obsv, rng)
-            return runner_state, transition
+            return runner_state, (transition, env_state)
 
-        runner_state, traj_batch = jax.lax.scan(
-            _env_step, runner_state, None, self._config["NUM_STEPS"]
+    # TRAIN LOOP
+    def _update_step(self, use_external_rewards, runner_state, unused):
+        # RUN ENV
+        runner_state, (traj_batch, _) = jax.lax.scan(
+            self._env_step, runner_state, None, self._config["NUM_STEPS"]
         )
 
         # CALCULATE ADVANTAGE
@@ -375,6 +377,41 @@ class PPOAgent():
 
         runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
         return runner_state, metric["returned_episode_returns"]
+
+    def run_and_save_gif(self, runner_state, num_steps=1000, num_vis_steps = 200, output_loc="./logs/MountainCar.gif"):
+        # RUN ENV
+        _, (_, env_states) = jax.lax.scan(
+            self._env_step, runner_state, None, num_steps
+        )
+
+        # Convert to a list
+        env_state_arr = env_states.env_state
+        print("Converting state..")
+        env_state_seq = []
+        reward_seq = []
+        env_state = type(env_state_arr)
+        dict_env_arr = asdict(env_state_arr)
+        fields = env_state.__annotations__.keys()
+        
+        for i in range(num_steps - num_vis_steps, num_steps):
+            entry_dict = {}
+            # Calculate the first episode's information
+            for key in fields:
+                entry_dict[key] = dict_env_arr[key][i][0]
+            env_state_seq.append(env_state(**entry_dict))
+            reward_seq.append(env_states.episode_returns[i][0])
+
+        print("reward_seq", reward_seq)
+        print("env_state_seq", env_state_seq)
+        
+        # Create a gif that visualises the experience.
+        print("Starting the saving process..")
+        from pyvirtualdisplay import Display  # type: ignore
+        display = Display(visible=0, size=(1400, 900))
+        display.start()
+        print("Saving gif..")
+        vis = Visualizer(self._env, self._env_params, env_state_seq, reward_seq)
+        vis.animate(output_loc, view=False)
 
     def run(self, runner_state, logger, external_rewards=True, steps=10000, evaluation=False):
 
