@@ -15,9 +15,9 @@ def main(cfg: DictConfig) -> None:
     rng = jax.random.PRNGKey(cfg.seed)
     runner_state = agent.init_state(rng)
 
-    # if cfg.explore_first:
+    if cfg.explore_first:
         # Run the agent in exploration mode
-        # runner_state, log_info = agent.run(runner_state, logger, steps=cfg.pre_training_steps, external_rewards=False,)
+        runner_state = agent.run(runner_state, logger, steps=cfg.pre_training_steps, external_rewards=False,)
     
     # Visialize the Gymnax environment
     agent.run_and_save_gif(runner_state)

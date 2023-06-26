@@ -188,10 +188,11 @@ class PPOAgent():
             tx=tx,
         )
 
-        return (policy_train_state, wm_train_state, env_state, obsv, rng)
+        step = 0
+        return (policy_train_state, wm_train_state, env_state, obsv, rng, step)
     
     def _env_step(self, runner_state, unused):
-        policy_train_state, wm_train_state, env_state, last_obs, rng = runner_state
+        policy_train_state, wm_train_state, env_state, last_obs, rng, step = runner_state
 
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
@@ -229,18 +230,20 @@ class PPOAgent():
         transition = Transition(
             done, action, value, reward, log_prob, last_obs, obsv, info
         )
-        runner_state = (policy_train_state, wm_train_state, env_state, obsv, rng)
+        
+        # Step once for every environment.
+        runner_state = (policy_train_state, wm_train_state, env_state, obsv, rng, step + self._config["NUM_ENVS"])
         return runner_state, (transition, env_state)
 
     # TRAIN LOOP
-    def _update_step(self, use_external_rewards, runner_state, unused):
+    def _update_step(self, runner_state):
         # RUN ENV
         runner_state, (traj_batch, _) = jax.lax.scan(
             self._env_step, runner_state, None, self._config["NUM_STEPS"]
         )
 
         # CALCULATE ADVANTAGE
-        policy_train_state, wm_train_state, env_state, last_obs, rng = runner_state
+        policy_train_state, wm_train_state, env_state, last_obs, rng, step = runner_state
         _, last_val = self._policy_network.apply(policy_train_state.params, last_obs)
 
         def _calculate_gae(traj_batch, last_val):
@@ -379,29 +382,22 @@ class PPOAgent():
         policy_train_state, wm_train_state = update_state[:2]
         step_rewards = traj_batch.info["step_rewards"]
 
-        print("Dones: ", traj_batch.done.shape)
-        print("step_rewards", step_rewards.shape)
-        exit()
+        avg_score = jnp.sum(step_rewards) / jnp.sum(traj_batch.done)
+
         rng = update_state[-1]
         if self._config.get("DEBUG"):
-            def callback(metric, loss_info):
-                return_values = metric["returned_episode_returns"][metric["returned_episode"]]
-                timesteps = metric["timestep"][metric["returned_episode"]]
+            def callback(avg_return, loss_info, step):
+                print(f"Timestep: {step}. Episodic return={avg_return}")
+                self._logger.write("avg_return", avg_return, step=step)
+                self._logger.write("total_loss", loss_info["total_loss"], step=step)
+                self._logger.write("value_loss", loss_info["value_loss"], step=step)
+                self._logger.write("actor_loss", loss_info["actor_loss"], step=step)
+                self._logger.write("entropy_loss", loss_info["entropy_loss"], step=step)
+                self._logger.write("wm_loss", loss_info["wm_loss"], step=step)
+            jax.debug.callback(callback, avg_score, loss_info, step)
 
-                if len(return_values) > 0:
-                    avg_return = np.mean(return_values, axis=0)
-                    # for t in range(len(timesteps)):
-                    print(f"Timestep: {np.mean(timesteps)}. Episodic return={np.mean(return_values)}")
-                    self._logger.write("avg_return", avg_return, step=timesteps[0])
-                    self._logger.write("total_loss", loss_info["total_loss"], step=timesteps[0])
-                    self._logger.write("value_loss", loss_info["value_loss"], step=timesteps[0])
-                    self._logger.write("actor_loss", loss_info["actor_loss"], step=timesteps[0])
-                    self._logger.write("entropy_loss", loss_info["entropy_loss"], step=timesteps[0])
-                    self._logger.write("wm_loss", loss_info["wm_loss"], step=timesteps[0])
-            jax.debug.callback(callback, metric, loss_info)
-
-        runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
-        return runner_state, metric["returned_episode_returns"]
+        runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng, step)
+        return runner_state
 
     def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/Maze.gif"):
         # RUN ENV
@@ -426,9 +422,9 @@ class PPOAgent():
 
         # TRAIN LOOP
         num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
-        update_fn = lambda runner_state, unused: self._update_step(external_rewards, runner_state, unused)
+        update_fn = lambda runner_state: self._update_step(runner_state)
         scan_fn = lambda runner_state: jax.lax.scan(
             update_fn, runner_state, None, length=num_updates
         )
-        runner_state, epi_returns = jax.jit(scan_fn)(runner_state)
-        return runner_state, epi_returns
+        runner_state = jax.jit(scan_fn)(runner_state)
+        return runner_state
