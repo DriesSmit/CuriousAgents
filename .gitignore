@@ -165,5 +165,8 @@ ca_env
 # Logs
 logs
 
+# Docs
+docs
+
 # Hydra
 ouputs
