@@ -1,8 +1,8 @@
 defaults:
-  - agent: ppo_ff_world_model
+  - agent: ppo_boyl_explore
 
 name: CuriousAgents
-env_name: MountainCar-v0 # CartPole-v1
+env_name: Maze-v0 # MountainCar-v0
 pre_training_steps: 5000000
 fine_tuning_steps: 0
 seed: 1234

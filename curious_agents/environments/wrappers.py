@@ -7,7 +7,7 @@ import chex
 import numpy as np
 from flax import struct
 from functools import partial
-from typing import Optional, Tuple, Union, Any
+from typing import Optional, Tuple, Union
 from gymnax.environments import environment, spaces
 from brax import envs
 
@@ -69,7 +69,6 @@ class LogEnvState:
     returned_episode_returns: float
     returned_episode_lengths: int
     timestep: int
-
 
 class LogWrapper(GymnaxWrapper):
     """Log the episode returns and lengths."""
