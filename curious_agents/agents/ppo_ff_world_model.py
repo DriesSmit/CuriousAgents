@@ -378,7 +378,7 @@ class PPOAgent():
         runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
         return runner_state, metric["returned_episode_returns"]
 
-    def run_and_save_gif(self, runner_state, num_steps=1000, num_vis_steps = 200, output_loc="./logs/MountainCar.gif"):
+    def run_and_save_gif(self, runner_state, num_steps=1000, num_vis_steps = 1000, output_loc="./logs/MountainCar.gif"):
         # RUN ENV
         _, (_, env_states) = jax.lax.scan(
             self._env_step, runner_state, None, num_steps
@@ -401,9 +401,6 @@ class PPOAgent():
             env_state_seq.append(env_state(**entry_dict))
             reward_seq.append(env_states.episode_returns[i][0])
 
-        print("reward_seq", reward_seq)
-        print("env_state_seq", env_state_seq)
-        
         # Create a gif that visualises the experience.
         print("Starting the saving process..")
         from pyvirtualdisplay import Display  # type: ignore
