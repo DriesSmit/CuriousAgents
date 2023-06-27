@@ -11,6 +11,7 @@ from flax.training.train_state import TrainState
 import distrax
 import jumanji
 from jumanji.wrappers import AutoResetWrapper
+import chex
 
 # Turn the observation into an 3D array
 # Adapted from jumanji's process_observation function
@@ -45,20 +46,18 @@ class ObservationEncoder(nn.Module):
 
         # The input is 4 dimentional
         layer_out = nn.Conv(
-            features=32,
+            features=16,
             kernel_size=(3, 3),
-            strides=(1, 1),
-            padding="SAME",
+            strides=(2, 2),
             kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
         )(x)
         layer_out = activation(layer_out)
         
         layer_out = nn.Conv(
-            features=32,
+            features=16,
             kernel_size=(3, 3),
-            strides=(1, 1),
-            padding="SAME",
+            strides=(2, 2),
             kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
         )(layer_out)
@@ -254,7 +253,7 @@ class PPOAgent():
 
         # INIT THE WORLD MODEL
         latent_size = self._online_encoder.latent_size
-        zero_latent = jnp.zeros(latent_size, dtype=jnp.int32)
+        zero_latent = jnp.zeros(latent_size, dtype=jnp.float32)
         zero_action = jnp.zeros((), dtype=jnp.int32)
         wm_params = self._world_model.init(wm_rng, zero_latent, zero_action)
 
@@ -320,10 +319,9 @@ class PPOAgent():
         
         done = timestep.last()
         original_reward = timestep.reward
-        obs = timestep.observation
         
         # Turn the observation into an 3D array
-        obs = process_observation(obs)
+        obs = process_observation(timestep.observation)
 
         # Calcuate the distance between the predicted and the actual observation
         l_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)
@@ -450,7 +448,7 @@ class PPOAgent():
                     # CALCULATE WORLD MODEL LOSS
                     # TODO: Implement the paper's loss function. Their loss has two
                     #  normalisation terms.
-                    return (compute_distance(l_t, pred_l_t)).mean() # *(1.0-traj_batch.done)
+                    return compute_distance(pred_l_t, l_t).mean() # *(1.0-traj_batch.done)
                 grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
                 wm_loss, (online_grads, wm_grads), = grad_fn(
                     train_states.online.params, train_states.world_model.params, traj_batch,
@@ -580,5 +578,8 @@ class PPOAgent():
         scan_fn = lambda runner_state: jax.lax.scan(
             update_fn, runner_state, None, length=num_updates
         )
+        # scan_fn = jax.jit(chex.assert_max_traces(scan_fn, n=1))
+        # runner_state, unused = scan_fn(runner_state)
         runner_state, unused = jax.jit(scan_fn)(runner_state)
+
         return runner_state
