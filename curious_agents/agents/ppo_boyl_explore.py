@@ -330,7 +330,7 @@ class PPOAgent():
                     pred_o_t = self._world_model.apply(params, traj_batch.obs, traj_batch.action)
                     # CALCULATE WORLD MODEL LOSS
                     # Don't train on the last step
-                    return (jnp.linalg.norm(traj_batch.next_obs - pred_o_t, axis=-1)*(1.0-traj_batch.done)).mean()
+                    return (jnp.linalg.norm(traj_batch.next_obs - pred_o_t, axis=-1)).mean() # *(1.0-traj_batch.done)
                 grad_fn = jax.value_and_grad(_wm_loss_fn)
                 wm_loss, grads = grad_fn(
                     wm_train_state.params, traj_batch,
@@ -387,7 +387,10 @@ class PPOAgent():
         rng = update_state[-1]
         if self._config.get("DEBUG"):
             def callback(avg_return, loss_info, step):
-                print(f"Timestep: {step}. Episodic return={avg_return}")
+                print(
+                    "Timestep: {}. Episode return: {:.2f}.".format(
+                        step, avg_return
+                    ))
                 self._logger.write("avg_return", avg_return, step=step)
                 self._logger.write("total_loss", loss_info["total_loss"], step=step)
                 self._logger.write("value_loss", loss_info["value_loss"], step=step)
@@ -422,9 +425,9 @@ class PPOAgent():
 
         # TRAIN LOOP
         num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]
-        update_fn = lambda runner_state: self._update_step(runner_state)
+        update_fn = lambda runner_state, unused: (self._update_step(runner_state), None)
         scan_fn = lambda runner_state: jax.lax.scan(
             update_fn, runner_state, None, length=num_updates
         )
-        runner_state = jax.jit(scan_fn)(runner_state)
+        runner_state, unused = jax.jit(scan_fn)(runner_state)
         return runner_state

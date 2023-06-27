@@ -1,9 +1,9 @@
 defaults:
-  - agent: ppo_boyl_explore
+  - agent: ppo_boyl_explore # ppo_ff_world_model # 
 
 name: CuriousAgents
-env_name: Maze-v0 # MountainCar-v0
-pre_training_steps: 5000000
+env_name: Maze-v0 # MountainCar-v0 # 
+pre_training_steps: 500000000
 fine_tuning_steps: 0
 seed: 1234
 explore_first: True
