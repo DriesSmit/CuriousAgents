@@ -284,8 +284,6 @@ class PPOAgent():
             "online": online_train_state,
             "target": target_params,
             "world_model": wm_train_state,
-            
-
         }
 
         step = 0
@@ -430,28 +428,24 @@ class PPOAgent():
                 # UPDATE THE WORLD MODEL
                 def _wm_loss_fn(online_params, world_model_params, traj_batch):
                     # RERUN NETWORKS
-                    print("last_obs: ", last_obs.shape)
-                    l_tm1 = self._online_encoder.apply(online_params, last_obs)
-                    print("l_tm1: ", l_tm1.shape, "action: ", traj_batch.action.shape)
+                    l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
                     pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
-                    l_t = jax.lax.stop_gradient(self._target_model.apply(train_states["target"], traj_batch.next_obs))
+                    l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states["target"], traj_batch.next_obs))
 
                     # CALCULATE WORLD MODEL LOSS
                     # TODO: Implement the paper's loss function. Their loss has two
                     #  normalisation terms.
                     return (jnp.linalg.norm(l_t - pred_l_t, axis=-1)).mean() # *(1.0-traj_batch.done)
-                grad_fn = jax.value_and_grad(_wm_loss_fn)
-                wm_loss, grads = grad_fn(
+                grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
+                wm_loss, (online_grads, wm_grads), = grad_fn(
                     train_states["online"].params, train_states["world_model"].params, traj_batch,
                 )
 
-                # print("Grads: ", grads)
-                exit("It works!")
-                train_states["online"] = train_states["online"].apply_gradients(grads=grads[0])
-                train_states["world_model"] = train_states["world_model"].apply_gradients(grads=grads[1])
+                train_states["online"] = train_states["online"].apply_gradients(grads=online_grads)
+                train_states["world_model"] = train_states["world_model"].apply_gradients(grads=wm_grads)
 
                 # UPDATE THE TARGET MODEL USING MOVING AVERAGES
-                train_states["target"] = jax.tree_multimap(
+                train_states["target"] = jax.tree_util.tree_map(
                     lambda target, online: (
                         1 - self._config["TARGET_UPDATE_RATE"]
                     ) * target
@@ -459,7 +453,6 @@ class PPOAgent():
                     train_states["target"],
                     train_states["online"].params,
                 )
-
                 return train_states, [pol_loss, wm_loss]
 
             train_states, traj_batch, advantages, targets, rng = update_state
@@ -490,9 +483,12 @@ class PPOAgent():
             return update_state, loss
 
         update_state = (train_states, traj_batch, advantages, targets, rng)
+        print("train_states: ", train_states)
         update_state, loss = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )   
+
+        exit("Yes queen!")
       
         (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss = loss
         loss_info = {
