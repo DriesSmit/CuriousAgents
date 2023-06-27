@@ -175,7 +175,7 @@ def flatten_params(params):
 
 def compute_distance(arr1, arr2,  axis=-1):
     """Compute the Euclidean distance between two sets of arrays."""
-    return jnp.linalg.norm(arr1 - arr1, axis=-1)
+    return jnp.linalg.norm(arr1 - arr2, axis=axis)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -547,7 +547,7 @@ class PPOAgent():
                 self._logger.write("actor_loss", metric_info["actor_loss"], step=step)
                 self._logger.write("entropy_loss", metric_info["entropy_loss"], step=step)
                 self._logger.write("wm_loss", metric_info["wm_loss"], step=step)
-                self._logger.write("target_dist", metric_info["target_dist"], step=step)
+                self._logger.write("target_distance", metric_info["target_dist"], step=step)
             jax.debug.callback(callback, avg_score, metric_info, step)
 
         runner_state = (train_states, env_state, last_obs, rng, step)
