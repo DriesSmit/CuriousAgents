@@ -142,12 +142,14 @@ class PPOAgent():
             )
             return self._config["LR"] * frac
         
-        #
-        rng, _rng = jax.random.split(rng)
+        rng, policy_rng, wm_rng = jax.random.split(rng, 3)
         zero_obs = jnp.zeros(self._env.observation_space(self._env_params).shape)
-        policy_params = self._policy_network.init(_rng, zero_obs)
+        policy_params = self._policy_network.init(policy_rng, zero_obs)
         zero_action = jnp.zeros(self._env.action_space(self._env_params).shape, dtype=jnp.int32)
-        wm_params = self._world_model.init(_rng, zero_obs, zero_action)
+
+        print("Is this just 1? Action shape: ", zero_action.shape)
+        exit()
+        wm_params = self._world_model.init(wm_rng, zero_obs, zero_action)
 
         if self._config["ANNEAL_LR"]:
             tx = optax.chain(

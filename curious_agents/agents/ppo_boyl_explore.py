@@ -11,20 +11,27 @@ from flax.training.train_state import TrainState
 import distrax
 import jumanji
 from jumanji.wrappers import AutoResetWrapper
-from jumanji.training.networks.maze.actor_critic import process_observation
-from dataclasses import asdict
 
-# TODO: Remove this. Use the default 3D observation instead.
+# Turn the observation into an 3D array
+# Adapted from jumanji's process_observation function
 def process_observation(observation):
     """Add the agent and the target to the walls array."""
-    batch_size = observation.walls.shape[0]
-    wall_obs =  observation.walls.reshape(batch_size, -1)
-    agent_pos = jnp.stack(observation.agent_position, axis=-1)
-    target_pos = jnp.stack(observation.target_position, axis=-1)
-    return jnp.concatenate([wall_obs, agent_pos, target_pos], axis=-1)
+    agent = 2
+    target = 3
+    obs = observation.walls.astype(int)
+    obs = obs.at[tuple(observation.agent_position)].set(agent)
+    obs = obs.at[tuple(observation.target_position)].set(target)
 
-class ActorCritic(nn.Module):
-    action_dim: Sequence[int]
+    # Determine the number of unique classes
+    n_classes = target + 1  # assuming classes start at 0
+
+    # One-hot encode the observations
+    one_hot_obs = jax.nn.one_hot(obs, n_classes)
+
+    return one_hot_obs
+
+class ObservationEncoder(nn.Module):
+    latent_size: Sequence[int]
     activation: str = "tanh"
 
     @nn.compact
@@ -33,22 +40,77 @@ class ActorCritic(nn.Module):
             activation = nn.relu
         else:
             activation = nn.tanh
-        actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+
+        # Convolutional layers
+
+        # The input is 4 dimentional
+        layer_out = nn.Conv(
+            features=32,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
         )(x)
+        layer_out = activation(layer_out)
+        
+        layer_out = nn.Conv(
+            features=32,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(layer_out)
+        layer_out = activation(layer_out)
+
+        # Flatten all dimensions except the batch dimension
+        layer_out = layer_out.reshape((layer_out.shape[0], -1))
+
+        # Dense layers
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(layer_out)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(layer_out)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(self.latent_size, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            layer_out
+        )
+        return layer_out
+    
+class ActorCritic(nn.Module):
+    action_dim: Sequence[int]
+    latent_size: Sequence[int]
+    activation: str = "tanh"
+
+    @nn.compact
+    def __call__(self, x):
+        if self.activation == "relu":
+            activation = nn.relu
+        else:
+            activation = nn.tanh
+
+        policy_obs_encoder = ObservationEncoder(self.latent_size, self.activation)
+        
+        actor_mean = policy_obs_encoder(x)
         actor_mean = activation(actor_mean)
+
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(actor_mean)
         actor_mean = activation(actor_mean)
+
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
+
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(x)
+        critic_obs_encoder = ObservationEncoder(self.latent_size,  self.activation)
+        critic = critic_obs_encoder(x)
         critic = activation(critic)
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
@@ -65,16 +127,16 @@ class WorldModel(nn.Module):
     activation: str = "tanh"
 
     @nn.compact
-    def __call__(self, x, action):
+    def __call__(self, latent_in, action):
         if self.activation == "relu":
             activation = nn.relu
         else:
             activation = nn.tanh
-
+        
         # One-hot encode the action
         one_hot_action = jax.nn.one_hot(action, self.action_dim)
 
-        inp = jnp.concatenate([x, one_hot_action], axis=-1)
+        inp = jnp.concatenate([latent_in, one_hot_action], axis=-1)
 
         layer_out = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
@@ -84,7 +146,7 @@ class WorldModel(nn.Module):
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(layer_out)
         layer_out = activation(layer_out)
-        layer_out = nn.Dense(x.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+        layer_out = nn.Dense(latent_in.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             layer_out
         )
         return layer_out
@@ -115,6 +177,8 @@ class PPOAgent():
         "ENT_COEF": 0.01,
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
+        "TARGET_UPDATE_RATE": 0.005,
+        "LATENT_SIZE": 32,
         "ACTIVATION": "tanh",
         "ENV_NAME": env_name,
         "ANNEAL_LR": False,
@@ -130,12 +194,19 @@ class PPOAgent():
         # INIT NETWORKS
         num_actions = self._env.action_spec().num_values
         self._policy_network = ActorCritic(
+            num_actions, self._config["LATENT_SIZE"], activation=self._config["ACTIVATION"]
+        )
+
+        self._online_encoder = ObservationEncoder(
+            latent_size=self._config["LATENT_SIZE"], activation=self._config["ACTIVATION"]
+        )
+
+        self._world_model = WorldModel(
             num_actions, activation=self._config["ACTIVATION"]
         )
 
-        # INIT NETWORK
-        self._world_model = WorldModel(
-            num_actions, activation=self._config["ACTIVATION"]
+        self._target_encoder = ObservationEncoder(
+            latent_size=self._config["LATENT_SIZE"], activation=self._config["ACTIVATION"]
         )
 
         # INIT LOGGER
@@ -154,85 +225,117 @@ class PPOAgent():
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
-        env_state, timestep = jax.vmap(self._env.reset)(reset_rng)
+        env_state, timestep = jax.vmap(self._env.reset)(reset_rng)        
 
-         # Turn the observation into an 3D array
-        obsv = process_observation(timestep.observation)
+        obs = jax.vmap(process_observation)(timestep.observation)
 
-        # INIT THE NETWORKS
-        rng, _rng = jax.random.split(rng)
+        # INIT THE POLICY
+        rng, pol_rng, online_rng, target_rng, wm_rng = jax.random.split(rng, 5)
+        policy_params = self._policy_network.init(pol_rng, obs)
+        
+        # INIT THE ENCODERS
+        online_params = self._online_encoder.init(online_rng, obs)
+        target_params = self._target_encoder.init(target_rng, obs)
 
-        policy_params = self._policy_network.init(_rng, obsv)
-        num_actions = self._env.action_spec().num_values
-        zero_action = jnp.zeros(num_actions, dtype=jnp.int32)
-        wm_params = self._world_model.init(_rng, obsv, zero_action)
+        # INIT THE WORLD MODEL
+        latent_size = self._online_encoder.latent_size
+        zero_latent = jnp.zeros(latent_size, dtype=jnp.int32)
+        zero_action = jnp.zeros((), dtype=jnp.int32)
+        wm_params = self._world_model.init(wm_rng, zero_latent, zero_action)
 
         if self._config["ANNEAL_LR"]:
-            tx = optax.chain(
+            pol_tx = optax.chain(
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
                 optax.adam(learning_rate=linear_schedule, eps=1e-5),
             )
+            wm_tx = optax.chain(
+                optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
+                optax.adam(learning_rate=linear_schedule, eps=5e-6),
+            )
         else:
-            tx = optax.chain(
+            pol_tx = optax.chain(
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
                 optax.adam(self._config["LR"], eps=1e-5),
+            )
+            wm_tx = optax.chain(
+                optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
+                optax.adam(self._config["LR"], eps=5e-6),
             )
         policy_train_state = TrainState.create(
             apply_fn=self._policy_network.apply,
             params=policy_params,
-            tx=tx,
+            tx=pol_tx,
         )
+
+        online_train_state = TrainState.create(
+            apply_fn=self._online_encoder.apply,
+            params=online_params,
+            tx=wm_tx,
+        )
+
         wm_train_state = TrainState.create(
             apply_fn=self._world_model.apply,
             params=wm_params,
-            tx=tx,
+            tx=wm_tx,
         )
 
+        train_states = {
+            "policy": policy_train_state,
+            "online": online_train_state,
+            "target": target_params,
+            "world_model": wm_train_state,
+            
+
+        }
+
         step = 0
-        return (policy_train_state, wm_train_state, env_state, obsv, rng, step)
+        return (train_states, env_state, obs, rng, step)
     
     def _env_step(self, runner_state, unused):
-        policy_train_state, wm_train_state, env_state, last_obs, rng, step = runner_state
+        train_states, env_state, last_obs, rng, step = runner_state
 
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
-        pi, value = self._policy_network.apply(policy_train_state.params, last_obs)
+        pi, value = self._policy_network.apply(train_states["policy"].params, last_obs)
         action = pi.sample(seed=_rng)
-
         log_prob = pi.log_prob(action)
 
         # STEP ENV
         env_state, timestep = jax.vmap(
             self._env.step, in_axes=(0, 0)
         )(env_state, action)
-
+        
         done = timestep.last()
         original_reward = timestep.reward
-        obsv = timestep.observation
+        obs = timestep.observation
         
         # Turn the observation into an 3D array
-        obsv = process_observation(obsv)
+        obs = process_observation(obs)
 
         # Calcuate the distance between the predicted and the actual observation
-        pred_o_t = self._world_model.apply(wm_train_state.params, last_obs, action)
-        dist = jnp.linalg.norm(obsv - pred_o_t, axis=-1)
+        l_tm1 = self._online_encoder.apply(train_states["online"].params, last_obs)
+        pred_l_t = self._world_model.apply(train_states["world_model"].params, l_tm1, action)
 
+        # Get the latent state from the target network
+        l_t = self._target_encoder.apply(train_states["target"], obs)
+
+        dist = jnp.linalg.norm(pred_l_t - l_t, axis=-1)
 
         # Calculate the internal reward
         # TODO: Change this back
-        reward =  dist # 0.1*jnp.abs(obsv[..., 1]) + done #dist 
-        # jnp.abs(obsv[..., 1]) + done # jnp.square(dist) # - 0.1*jnp.log(jnp.square(dist))
+        reward =  dist # 0.1*jnp.abs(obs[..., 1]) + done #dist 
+        # jnp.abs(obs[..., 1]) + done # jnp.square(dist) # - 0.1*jnp.log(jnp.square(dist))
         # jax.debug.print("reward: {x}", x=reward, y=log_prob)
         # reward = use_external_rewards*reward - (1-use_external_rewards)*jnp.log(jnp.square(dist))
 
         info = {"step_rewards": original_reward, "mod_reward": reward}
 
         transition = Transition(
-            done, action, value, reward, log_prob, last_obs, obsv, info
+            done, action, value, reward, log_prob, last_obs, obs, info
         )
         
         # Step once for every environment.
-        runner_state = (policy_train_state, wm_train_state, env_state, obsv, rng, step + self._config["NUM_ENVS"])
+        runner_state = (train_states, env_state, obs, rng, step + self._config["NUM_ENVS"])
         return runner_state, (transition, env_state)
 
     # TRAIN LOOP
@@ -243,8 +346,8 @@ class PPOAgent():
         )
 
         # CALCULATE ADVANTAGE
-        policy_train_state, wm_train_state, env_state, last_obs, rng, step = runner_state
-        _, last_val = self._policy_network.apply(policy_train_state.params, last_obs)
+        train_states, env_state, last_obs, rng, step = runner_state
+        _, last_val = self._policy_network.apply(train_states["policy"].params, last_obs)
 
         def _calculate_gae(traj_batch, last_val):
             def _get_advantages(gae_and_next_value, transition):
@@ -274,8 +377,7 @@ class PPOAgent():
 
         # UPDATE NETWORK
         def _update_epoch(update_state, unused):
-            def _update_minbatch(train_state, batch_info):
-                policy_train_state, wm_train_state = train_state
+            def _update_minbatch(train_states, batch_info):
                 traj_batch, advantages, targets = batch_info
 
                 def _agent_loss_fn(params, traj_batch, gae, targets):
@@ -318,27 +420,49 @@ class PPOAgent():
                     )
                     return total_loss, (value_loss, actor_loss, entropy_loss)
 
+                # UPDATE THE POLICY
                 grad_fn = jax.value_and_grad(_agent_loss_fn, has_aux=True)
                 pol_loss, grads = grad_fn(
-                    policy_train_state.params, traj_batch, advantages, targets
+                    train_states["policy"].params, traj_batch, advantages, targets
                 )
-                policy_train_state = policy_train_state.apply_gradients(grads=grads)
+                train_states["policy"] = train_states["policy"].apply_gradients(grads=grads)
 
                 # UPDATE THE WORLD MODEL
-                def _wm_loss_fn(params, traj_batch):
-                    # RERUN NETWORK
-                    pred_o_t = self._world_model.apply(params, traj_batch.obs, traj_batch.action)
+                def _wm_loss_fn(online_params, world_model_params, traj_batch):
+                    # RERUN NETWORKS
+                    print("last_obs: ", last_obs.shape)
+                    l_tm1 = self._online_encoder.apply(online_params, last_obs)
+                    print("l_tm1: ", l_tm1.shape, "action: ", traj_batch.action.shape)
+                    pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
+                    l_t = jax.lax.stop_gradient(self._target_model.apply(train_states["target"], traj_batch.next_obs))
+
                     # CALCULATE WORLD MODEL LOSS
-                    # Don't train on the last step
-                    return (jnp.linalg.norm(traj_batch.next_obs - pred_o_t, axis=-1)).mean() # *(1.0-traj_batch.done)
+                    # TODO: Implement the paper's loss function. Their loss has two
+                    #  normalisation terms.
+                    return (jnp.linalg.norm(l_t - pred_l_t, axis=-1)).mean() # *(1.0-traj_batch.done)
                 grad_fn = jax.value_and_grad(_wm_loss_fn)
                 wm_loss, grads = grad_fn(
-                    wm_train_state.params, traj_batch,
+                    train_states["online"].params, train_states["world_model"].params, traj_batch,
                 )
-                wm_train_state = wm_train_state.apply_gradients(grads=grads)
-                return [policy_train_state, wm_train_state], [pol_loss, wm_loss]
 
-            policy_train_state, wm_train_state, traj_batch, advantages, targets, rng = update_state
+                # print("Grads: ", grads)
+                exit("It works!")
+                train_states["online"] = train_states["online"].apply_gradients(grads=grads[0])
+                train_states["world_model"] = train_states["world_model"].apply_gradients(grads=grads[1])
+
+                # UPDATE THE TARGET MODEL USING MOVING AVERAGES
+                train_states["target"] = jax.tree_multimap(
+                    lambda target, online: (
+                        1 - self._config["TARGET_UPDATE_RATE"]
+                    ) * target
+                    + self._config["TARGET_UPDATE_RATE"] * online,
+                    train_states["target"],
+                    train_states["online"].params,
+                )
+
+                return train_states, [pol_loss, wm_loss]
+
+            train_states, traj_batch, advantages, targets, rng = update_state
             rng, _rng = jax.random.split(rng)
             batch_size = self._config["MINIBATCH_SIZE"] * self._config["NUM_MINIBATCHES"]
             assert (
@@ -359,13 +483,13 @@ class PPOAgent():
                 shuffled_batch,
             )
             train_state, loss = jax.lax.scan(
-                _update_minbatch, [policy_train_state, wm_train_state], minibatches
+                _update_minbatch, train_states, minibatches
             )
  
             update_state = tuple(train_state) + (traj_batch, advantages, targets, rng)
             return update_state, loss
 
-        update_state = (policy_train_state, wm_train_state, traj_batch, advantages, targets, rng)
+        update_state = (train_states, traj_batch, advantages, targets, rng)
         update_state, loss = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )   
@@ -379,7 +503,7 @@ class PPOAgent():
             "wm_loss": wm_loss.mean(),
         }
          
-        policy_train_state, wm_train_state = update_state[:2]
+        train_states = update_state[0]
         step_rewards = traj_batch.info["step_rewards"]
 
         avg_score = jnp.sum(step_rewards) / jnp.sum(traj_batch.done)
@@ -399,7 +523,7 @@ class PPOAgent():
                 self._logger.write("wm_loss", loss_info["wm_loss"], step=step)
             jax.debug.callback(callback, avg_score, loss_info, step)
 
-        runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng, step)
+        runner_state = (train_states, env_state, last_obs, rng, step)
         return runner_state
 
     def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/Maze.gif"):
