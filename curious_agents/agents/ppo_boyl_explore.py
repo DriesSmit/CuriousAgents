@@ -166,6 +166,17 @@ class BOYLTrainState(NamedTuple):
         online: jnp.array
         target: jnp.array
         world_model: jnp.array
+
+def flatten_params(params):
+    """Flatten a dictionary of parameters into a vector."""
+    # Concatenate all parameter arrays into a single vector
+    return jnp.concatenate([jnp.reshape(p, (-1,)) for p in jax.tree_util.tree_leaves(params)])
+
+
+def compute_distance(arr1, arr2,  axis=-1):
+    """Compute the Euclidean distance between two sets of arrays."""
+    return jnp.linalg.norm(arr1 - arr1, axis=-1)
+
 class PPOAgent():
     def __init__(self, env_name) -> None:
         self._config = {
@@ -321,7 +332,7 @@ class PPOAgent():
         # Get the latent state from the target network
         l_t = self._target_encoder.apply(train_states.target, obs)
 
-        dist = jnp.linalg.norm(pred_l_t - l_t, axis=-1)
+        dist = compute_distance(pred_l_t, l_t)
 
         # Calculate the internal reward
         # TODO: Change this back
@@ -439,7 +450,7 @@ class PPOAgent():
                     # CALCULATE WORLD MODEL LOSS
                     # TODO: Implement the paper's loss function. Their loss has two
                     #  normalisation terms.
-                    return (jnp.linalg.norm(l_t - pred_l_t, axis=-1)).mean() # *(1.0-traj_batch.done)
+                    return (compute_distance(l_t, pred_l_t)).mean() # *(1.0-traj_batch.done)
                 grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
                 wm_loss, (online_grads, wm_grads), = grad_fn(
                     train_states.online.params, train_states.world_model.params, traj_batch,
@@ -457,6 +468,15 @@ class PPOAgent():
                     train_states.target,
                     train_states.online.params,
                 )
+                # Calculate the distance metrix between the online and target model
+                # STEP 1: Flatten both models
+                online_params_flat = flatten_params(train_states.online.params)
+                target_params_flat = flatten_params(train_states.target)
+
+                # STEP 2: Calculate the distance
+                distance = compute_distance(
+                    online_params_flat, target_params_flat,
+                )
 
                 train_states = BOYLTrainState(
                     policy=new_policy_state,
@@ -465,7 +485,7 @@ class PPOAgent():
                     target=new_target_state,
                 )
 
-                return train_states, [pol_loss, wm_loss]
+                return train_states, [pol_loss, wm_loss, distance]
 
             train_states, traj_batch, advantages, targets, rng = update_state
             rng, _rng = jax.random.split(rng)
@@ -487,26 +507,27 @@ class PPOAgent():
                 ),
                 shuffled_batch,
             )
-            train_states, loss = jax.lax.scan(
+            train_states, metrics = jax.lax.scan(
                 _update_minbatch, train_states, minibatches
             )
-            return (train_states, traj_batch, advantages, targets, rng), loss
+            return (train_states, traj_batch, advantages, targets, rng), metrics
 
         update_state = (train_states, traj_batch, advantages, targets, rng)
 
-        update_state, loss = jax.lax.scan(
+        update_state, metrics = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
-        )   
+        ) 
 
-        (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss = loss
-        loss_info = {
+        (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss, target_dist = metrics
+        metric_info = {
             "total_loss": total_loss.mean(),
             "value_loss": value_loss.mean(),
             "actor_loss": actor_loss.mean(),
             "entropy_loss": entropy_loss.mean(),
             "wm_loss": wm_loss.mean(),
+            "target_dist": target_dist.mean(),
         }
-         
+
         train_states = update_state[0]
         step_rewards = traj_batch.info["step_rewards"]
 
@@ -514,18 +535,20 @@ class PPOAgent():
 
         rng = update_state[-1]
         if self._config.get("DEBUG"):
-            def callback(avg_return, loss_info, step):
+            def callback(avg_return, metric_info, step):
                 print(
                     "Timestep: {}. Episode return: {:.2f}.".format(
                         step, avg_return
                     ))
+                
                 self._logger.write("avg_return", avg_return, step=step)
-                self._logger.write("total_loss", loss_info["total_loss"], step=step)
-                self._logger.write("value_loss", loss_info["value_loss"], step=step)
-                self._logger.write("actor_loss", loss_info["actor_loss"], step=step)
-                self._logger.write("entropy_loss", loss_info["entropy_loss"], step=step)
-                self._logger.write("wm_loss", loss_info["wm_loss"], step=step)
-            jax.debug.callback(callback, avg_score, loss_info, step)
+                self._logger.write("total_loss", metric_info["total_loss"], step=step)
+                self._logger.write("value_loss", metric_info["value_loss"], step=step)
+                self._logger.write("actor_loss", metric_info["actor_loss"], step=step)
+                self._logger.write("entropy_loss", metric_info["entropy_loss"], step=step)
+                self._logger.write("wm_loss", metric_info["wm_loss"], step=step)
+                self._logger.write("target_dist", metric_info["target_dist"], step=step)
+            jax.debug.callback(callback, avg_score, metric_info, step)
 
         runner_state = (train_states, env_state, last_obs, rng, step)
         return runner_state
