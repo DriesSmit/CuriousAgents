@@ -161,7 +161,11 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-
+class BOYLTrainState(NamedTuple):
+        policy: jnp.array
+        online: jnp.array
+        target: jnp.array
+        world_model: jnp.array
 class PPOAgent():
     def __init__(self, env_name) -> None:
         self._config = {
@@ -279,12 +283,12 @@ class PPOAgent():
             tx=wm_tx,
         )
 
-        train_states = {
-            "policy": policy_train_state,
-            "online": online_train_state,
-            "target": target_params,
-            "world_model": wm_train_state,
-        }
+        train_states = BOYLTrainState(
+            policy=policy_train_state,
+            online=online_train_state,
+            target=target_params,
+            world_model=wm_train_state,
+        )
 
         step = 0
         return (train_states, env_state, obs, rng, step)
@@ -294,7 +298,7 @@ class PPOAgent():
 
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
-        pi, value = self._policy_network.apply(train_states["policy"].params, last_obs)
+        pi, value = self._policy_network.apply(train_states.policy.params, last_obs)
         action = pi.sample(seed=_rng)
         log_prob = pi.log_prob(action)
 
@@ -311,11 +315,11 @@ class PPOAgent():
         obs = process_observation(obs)
 
         # Calcuate the distance between the predicted and the actual observation
-        l_tm1 = self._online_encoder.apply(train_states["online"].params, last_obs)
-        pred_l_t = self._world_model.apply(train_states["world_model"].params, l_tm1, action)
+        l_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)
+        pred_l_t = self._world_model.apply(train_states.world_model.params, l_tm1, action)
 
         # Get the latent state from the target network
-        l_t = self._target_encoder.apply(train_states["target"], obs)
+        l_t = self._target_encoder.apply(train_states.target, obs)
 
         dist = jnp.linalg.norm(pred_l_t - l_t, axis=-1)
 
@@ -345,7 +349,7 @@ class PPOAgent():
 
         # CALCULATE ADVANTAGE
         train_states, env_state, last_obs, rng, step = runner_state
-        _, last_val = self._policy_network.apply(train_states["policy"].params, last_obs)
+        _, last_val = self._policy_network.apply(train_states.policy.params, last_obs)
 
         def _calculate_gae(traj_batch, last_val):
             def _get_advantages(gae_and_next_value, transition):
@@ -421,16 +425,16 @@ class PPOAgent():
                 # UPDATE THE POLICY
                 grad_fn = jax.value_and_grad(_agent_loss_fn, has_aux=True)
                 pol_loss, grads = grad_fn(
-                    train_states["policy"].params, traj_batch, advantages, targets
+                    train_states.policy.params, traj_batch, advantages, targets
                 )
-                train_states["policy"] = train_states["policy"].apply_gradients(grads=grads)
+                new_policy_state = train_states.policy.apply_gradients(grads=grads)
 
                 # UPDATE THE WORLD MODEL
                 def _wm_loss_fn(online_params, world_model_params, traj_batch):
                     # RERUN NETWORKS
                     l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
                     pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
-                    l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states["target"], traj_batch.next_obs))
+                    l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, traj_batch.next_obs))
 
                     # CALCULATE WORLD MODEL LOSS
                     # TODO: Implement the paper's loss function. Their loss has two
@@ -438,21 +442,29 @@ class PPOAgent():
                     return (jnp.linalg.norm(l_t - pred_l_t, axis=-1)).mean() # *(1.0-traj_batch.done)
                 grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
                 wm_loss, (online_grads, wm_grads), = grad_fn(
-                    train_states["online"].params, train_states["world_model"].params, traj_batch,
+                    train_states.online.params, train_states.world_model.params, traj_batch,
                 )
 
-                train_states["online"] = train_states["online"].apply_gradients(grads=online_grads)
-                train_states["world_model"] = train_states["world_model"].apply_gradients(grads=wm_grads)
+                new_online_state = train_states.online.apply_gradients(grads=online_grads)
+                new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
 
                 # UPDATE THE TARGET MODEL USING MOVING AVERAGES
-                train_states["target"] = jax.tree_util.tree_map(
+                new_target_state = jax.tree_util.tree_map(
                     lambda target, online: (
                         1 - self._config["TARGET_UPDATE_RATE"]
                     ) * target
                     + self._config["TARGET_UPDATE_RATE"] * online,
-                    train_states["target"],
-                    train_states["online"].params,
+                    train_states.target,
+                    train_states.online.params,
                 )
+
+                train_states = BOYLTrainState(
+                    policy=new_policy_state,
+                    online=new_online_state,
+                    world_model=new_wm_state,
+                    target=new_target_state,
+                )
+
                 return train_states, [pol_loss, wm_loss]
 
             train_states, traj_batch, advantages, targets, rng = update_state
@@ -475,21 +487,17 @@ class PPOAgent():
                 ),
                 shuffled_batch,
             )
-            train_state, loss = jax.lax.scan(
+            train_states, loss = jax.lax.scan(
                 _update_minbatch, train_states, minibatches
             )
- 
-            update_state = tuple(train_state) + (traj_batch, advantages, targets, rng)
-            return update_state, loss
+            return (train_states, traj_batch, advantages, targets, rng), loss
 
         update_state = (train_states, traj_batch, advantages, targets, rng)
-        print("train_states: ", train_states)
+
         update_state, loss = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )   
 
-        exit("Yes queen!")
-      
         (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss = loss
         loss_info = {
             "total_loss": total_loss.mean(),
