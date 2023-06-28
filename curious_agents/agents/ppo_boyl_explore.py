@@ -177,6 +177,19 @@ def compute_distance(arr1, arr2,  axis=-1):
     """Compute the Euclidean distance between two sets of arrays."""
     return jnp.linalg.norm(arr1 - arr2, axis=axis)
 
+def normalise(arr):
+    """Normalise an array using the L2 norm."""
+    norm = jnp.sqrt(jnp.sum(jnp.square(arr), axis=-1)).mean()
+    return arr/norm
+
+def boyl_loss(pred_l_t, l_t):
+    # CALCULATE WORLD MODEL LOSS
+    norm_pred_l_t = normalise(pred_l_t)
+    norm_l_t = normalise(l_t)
+
+    # Cap the world model loss
+    return jnp.square(compute_distance(norm_pred_l_t, norm_l_t))
+
 class PPOAgent():
     def __init__(self, env_name) -> None:
         self._config = {
@@ -191,8 +204,9 @@ class PPOAgent():
         "ENT_COEF": 0.01,
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
-        "TARGET_UPDATE_RATE": 0.005,
+        "TARGET_UPDATE_RATE": 0.001,
         "LATENT_SIZE": 64,
+        "REWARD_NORM_ALPHA": 0.999,
         "ACTIVATION": "relu",
         "ENV_NAME": env_name,
         "ANNEAL_LR": False,
@@ -304,10 +318,11 @@ class PPOAgent():
         )
 
         step = 0
-        return (train_states, env_state, obs, rng, step)
+        reward_std = 1.0
+        return (train_states, env_state, obs, reward_std, rng, step)
     
     def _env_step(self, runner_state, unused):
-        train_states, env_state, last_obs, rng, step = runner_state
+        train_states, env_state, last_obs, reward_std, rng, step = runner_state
 
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
@@ -334,7 +349,11 @@ class PPOAgent():
         l_t = self._target_encoder.apply(train_states.target, obs)
 
         # Set the reward to be the distance between the predicted and the actual observation
-        reward = compute_distance(pred_l_t, l_t)
+
+        reward = boyl_loss(pred_l_t, l_t)
+
+        reward_std = reward_std*self._config["REWARD_NORM_ALPHA"] + jnp.std(reward)*(1-self._config["REWARD_NORM_ALPHA"])
+        reward = reward/reward_std
 
         info = {"step_rewards": original_reward, "mod_reward": reward}
 
@@ -343,7 +362,7 @@ class PPOAgent():
         )
         
         # Step once for every environment.
-        runner_state = (train_states, env_state, obs, rng, step + self._config["NUM_ENVS"])
+        runner_state = (train_states, env_state, obs, reward_std, rng, step + self._config["NUM_ENVS"])
         return runner_state, (transition, env_state)
 
     # TRAIN LOOP
@@ -354,7 +373,7 @@ class PPOAgent():
         )
 
         # CALCULATE ADVANTAGE
-        train_states, env_state, last_obs, rng, step = runner_state
+        train_states, env_state, last_obs, reward_std, rng, step = runner_state
         _, last_val = self._policy_network.apply(train_states.policy.params, last_obs)
 
         def _calculate_gae(traj_batch, last_val):
@@ -439,11 +458,7 @@ class PPOAgent():
                     l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
                     pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
                     l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, traj_batch.next_obs))
-
-                    # CALCULATE WORLD MODEL LOSS
-                    # TODO: Implement the paper's loss function. Their loss has two
-                    #  normalisation terms.
-                    return compute_distance(pred_l_t, l_t).mean() # *(1.0-traj_batch.done)
+                    return boyl_loss(pred_l_t, l_t).mean()
                 grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
                 wm_loss, (online_grads, wm_grads), = grad_fn(
                     train_states.online.params, train_states.world_model.params, traj_batch,
@@ -543,7 +558,7 @@ class PPOAgent():
                 self._logger.write("target_distance", metric_info["target_dist"], step=step)
             jax.debug.callback(callback, avg_score, metric_info, step)
 
-        runner_state = (train_states, env_state, last_obs, rng, step)
+        runner_state = (train_states, env_state, last_obs, reward_std, rng, step)
         return runner_state
 
     def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/Maze.gif"):
