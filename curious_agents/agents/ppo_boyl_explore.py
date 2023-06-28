@@ -15,14 +15,11 @@ import chex
 
 # Turn the observation into an 3D array
 # Adapted from jumanji's process_observation function
-def process_observation(observation):
+def process_observation(observation, time_limit):
     """Add the agent and the target to the walls array."""
     agent = 2
     target = 3
     obs = observation.walls.astype(int)
-    time_limit = obs.shape[0]*obs.shape[1]
-    assert time_limit == 100, "Time limit is not 100"
-
     obs = obs.at[tuple(observation.agent_position)].set(agent)
     obs = obs.at[tuple(observation.target_position)].set(target)
 
@@ -205,7 +202,9 @@ class PPOAgent():
             self._config["NUM_ENVS"] * self._config["NUM_STEPS"] // self._config["NUM_MINIBATCHES"]
         )
 
-        self._env = jumanji.make(self._config["ENV_NAME"])
+
+        generator = jumanji.environments.routing.maze.generator.RandomGenerator(num_rows=5, num_cols=5)
+        self._env = jumanji.make(self._config["ENV_NAME"], generator=generator)
         self._env = AutoResetWrapper(self._env)
 
         # INIT NETWORKS
@@ -244,7 +243,7 @@ class PPOAgent():
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
 
         env_state, timestep = jax.vmap(self._env.reset)(reset_rng)        
-        obs = jax.vmap(process_observation)(timestep.observation)
+        obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
 
         # INIT THE POLICY
         rng, pol_rng, online_rng, target_rng, wm_rng = jax.random.split(rng, 5)
@@ -351,7 +350,7 @@ class PPOAgent():
         original_reward = timestep.reward
         
         # Turn the observation into an 3D array
-        obs = jax.vmap(process_observation)(timestep.observation)
+        obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
 
         # Calcuate the distance between the predicted and the actual observation
         # l_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)

@@ -3,7 +3,7 @@ defaults:
 
 name: CuriousAgents
 env_name: Maze-v0 # MountainCar-v0 # 
-pre_training_steps: 1e7
+pre_training_steps: 10e7
 fine_tuning_steps: 0
 seed: 1234
 explore_first: True

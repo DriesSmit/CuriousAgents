@@ -15,7 +15,7 @@ def main(cfg: DictConfig) -> None:
     rng = jax.random.PRNGKey(cfg.seed)
     runner_state = agent.init_state(rng)
 
-    if cfg.explore_first:
+    if cfg.explore_first and False:
         # Run the agent in exploration mode
         runner_state = agent.run(runner_state, logger, steps=cfg.pre_training_steps, external_rewards=False,)
     
