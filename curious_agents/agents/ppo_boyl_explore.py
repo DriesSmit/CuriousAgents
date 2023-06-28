@@ -184,11 +184,11 @@ def normalise(arr):
 
 def boyl_loss(pred_l_t, l_t):
     # CALCULATE WORLD MODEL LOSS
-    norm_pred_l_t = normalise(pred_l_t)
-    norm_l_t = normalise(l_t)
+    norm_pred_l_t = pred_l_t # normalise(pred_l_t)
+    norm_l_t = l_t # normalise(l_t)
 
     # Cap the world model loss
-    return jnp.square(compute_distance(norm_pred_l_t, norm_l_t))
+    return compute_distance(norm_pred_l_t, norm_l_t)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -355,7 +355,7 @@ class PPOAgent():
         reward_std = reward_std*self._config["REWARD_NORM_ALPHA"] + jnp.std(reward)*(1-self._config["REWARD_NORM_ALPHA"])
         reward = reward/reward_std
 
-        info = {"step_rewards": original_reward, "mod_reward": reward}
+        info = {"step_rewards": original_reward, "wm_rewards": reward}
 
         transition = Transition(
             done, action, value, reward, log_prob, last_obs, obs, info
@@ -538,25 +538,28 @@ class PPOAgent():
 
         train_states = update_state[0]
         step_rewards = traj_batch.info["step_rewards"]
+        wm_rewards = traj_batch.info["wm_rewards"]
 
-        avg_score = jnp.sum(step_rewards) / jnp.sum(traj_batch.done)
+        episode_rewards = jnp.sum(step_rewards) / jnp.sum(traj_batch.done)
+        episode_wm_rewards = jnp.sum(wm_rewards) / jnp.sum(traj_batch.done)
 
         rng = update_state[-1]
         if self._config.get("DEBUG"):
-            def callback(avg_return, metric_info, step):
+            def callback(episode_rewards, episode_wm_rewards, metric_info, step):
                 print(
                     "Timestep: {}. Episode return: {:.2f}.".format(
-                        step, avg_return
+                        step, episode_rewards
                     ))
                 
-                self._logger.write("avg_return", avg_return, step=step)
+                self._logger.write("episode_rewards", episode_rewards, step=step)
+                self._logger.write("episode_wm_rewards", episode_wm_rewards, step=step)
                 self._logger.write("total_loss", metric_info["total_loss"], step=step)
                 self._logger.write("value_loss", metric_info["value_loss"], step=step)
                 self._logger.write("actor_loss", metric_info["actor_loss"], step=step)
                 self._logger.write("entropy_loss", metric_info["entropy_loss"], step=step)
                 self._logger.write("wm_loss", metric_info["wm_loss"], step=step)
                 self._logger.write("target_distance", metric_info["target_dist"], step=step)
-            jax.debug.callback(callback, avg_score, metric_info, step)
+            jax.debug.callback(callback, episode_rewards, episode_wm_rewards, metric_info, step)
 
         runner_state = (train_states, env_state, last_obs, reward_std, rng, step)
         return runner_state
