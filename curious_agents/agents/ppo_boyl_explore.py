@@ -79,6 +79,9 @@ class ObservationEncoder(nn.Module):
             bias_init=constant(0.0),
         )(layer_out)
 
+        # tanh activation the output for stability
+        layer_out = nn.tanh(layer_out)
+
         return layer_out
     
 class ActorCritic(nn.Module):
@@ -96,7 +99,6 @@ class ActorCritic(nn.Module):
         policy_obs_encoder = ObservationEncoder(self.latent_size, self.activation)
         
         actor_mean = policy_obs_encoder(x)
-        actor_mean = activation(actor_mean)
 
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
@@ -111,7 +113,6 @@ class ActorCritic(nn.Module):
 
         critic_obs_encoder = ObservationEncoder(self.latent_size,  self.activation)
         critic = critic_obs_encoder(x)
-        critic = activation(critic)
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(critic)
