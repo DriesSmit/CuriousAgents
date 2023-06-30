@@ -7,5 +7,5 @@ train: True
 load_state: False
 visualise: False
 log_dir: "./logs"
-training_steps: 1e7 # 8.8e6
+training_steps: 2e7 # 8.8e6
 seed: 123456

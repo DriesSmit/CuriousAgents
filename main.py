@@ -5,6 +5,7 @@ from curious_agents.agents import create_agent
 from curious_agents.loggers.tensorboard import TensorBoardLogger
 import jax
 
+
 @hydra.main(version_base=None, config_path="configs", config_name="main")
 def main(cfg: DictConfig) -> None:
     # Setup the logger
