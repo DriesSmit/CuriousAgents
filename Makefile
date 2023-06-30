@@ -5,9 +5,10 @@ run:
 build:
 	sudo apt-get install xvfb
 	python -m venv ca_env
+	./ca_env/bin/pip install --upgrade "jax[cuda]"
 	./ca_env/bin/pip install -r ./requirements.txt
-	./ca_env/bin/pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-
+	
+	# ./ca_env/bin/pip install --upgrade "jax[cuda11_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 
 sudo_clean:
 	sudo rm -r ./logs

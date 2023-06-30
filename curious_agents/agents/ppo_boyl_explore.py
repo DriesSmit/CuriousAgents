@@ -173,6 +173,9 @@ def flatten_params(params):
     # Concatenate all parameter arrays into a single vector
     return jnp.concatenate([jnp.reshape(p, (-1,)) for p in jax.tree_util.tree_leaves(params)])
 
+def l2_norm_squared(arr, axis=-1):
+    # TODO: Should this be a mean instead for scalability?
+    return jnp.sum(jnp.square(arr), axis=axis)
 
 def compute_distance(arr1, arr2,  axis=-1):
     """Compute the Euclidean distance between two sets of arrays."""
@@ -185,11 +188,12 @@ def normalise(arr):
 
 def boyl_loss(pred_l_t, l_t):
     # CALCULATE WORLD MODEL LOSS
+    # TODO: Add these normalisation values back!
     norm_pred_l_t = pred_l_t # normalise(pred_l_t)
     norm_l_t = l_t # normalise(l_t)
 
     # Cap the world model loss
-    return compute_distance(norm_pred_l_t, norm_l_t)
+    return l2_norm_squared(norm_pred_l_t-norm_l_t)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -352,7 +356,6 @@ class PPOAgent():
         # Set the reward to be the distance between the predicted and the actual observation
 
         reward = boyl_loss(pred_l_t, l_t)
-
         reward_std = reward_std*self._config["REWARD_NORM_ALPHA"] + jnp.std(reward)*(1-self._config["REWARD_NORM_ALPHA"])
         reward = reward/reward_std
 
@@ -528,6 +531,7 @@ class PPOAgent():
         ) 
 
         (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss, target_dist = metrics
+        reward_std = runner_state[-3]
         metric_info = {
             "total_loss": total_loss.mean(),
             "value_loss": value_loss.mean(),
@@ -535,6 +539,7 @@ class PPOAgent():
             "entropy_loss": entropy_loss.mean(),
             "wm_loss": wm_loss.mean(),
             "target_dist": target_dist.mean(),
+            "reward_std": reward_std,
         }
 
         train_states = update_state[0]
@@ -560,6 +565,7 @@ class PPOAgent():
                 self._logger.write("entropy_loss", metric_info["entropy_loss"], step=step)
                 self._logger.write("wm_loss", metric_info["wm_loss"], step=step)
                 self._logger.write("target_distance", metric_info["target_dist"], step=step)
+                self._logger.write("reward_std", metric_info["reward_std"], step=step)
             jax.debug.callback(callback, episode_rewards, episode_wm_rewards, metric_info, step)
 
         runner_state = (train_states, env_state, last_obs, reward_std, rng, step)

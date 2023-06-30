@@ -24,16 +24,16 @@ def main(cfg: DictConfig) -> None:
         # Load runner state
         runner_state = manager.load(runner_state)
 
-        # Visialize the Gymnax environment
-        agent.run_and_save_gif(runner_state)
-    else:
+    if cfg.train:
         # Run the agent in exploration mode
-        runner_state = agent.run(runner_state, logger, steps=cfg.pre_training_steps)
+        runner_state = agent.run(runner_state, logger, steps=cfg.training_steps)
         
         # Save runner state
         manager.save(runner_state)
 
-    
+    if cfg.visualise:
+        # Visialise the Gymnax environment
+        agent.run_and_save_gif(runner_state)
 
 if __name__ == "__main__":
     main()
