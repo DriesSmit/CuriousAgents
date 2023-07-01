@@ -92,6 +92,8 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
+def l2_norm_squared(arr, axis=-1):
+    return jnp.sum(jnp.square(arr), axis=axis)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -105,12 +107,11 @@ class PPOAgent():
         "GAMMA": 0.99,
         "GAE_LAMBDA": 0.95,
         "CLIP_EPS": 0.2,
-        "ENT_COEF": 0.01,
+        "ENT_COEF": 0.02,
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
         "ENV_NAME": env_name,
-        "ANNEAL_LR": False,
         "DEBUG": True,
     }
         self._config["MINIBATCH_SIZE"] = (
@@ -142,32 +143,31 @@ class PPOAgent():
             )
             return self._config["LR"] * frac
         
-        #
-        rng, _rng = jax.random.split(rng)
+        rng, policy_rng, wm_rng = jax.random.split(rng, 3)
         zero_obs = jnp.zeros(self._env.observation_space(self._env_params).shape)
-        policy_params = self._policy_network.init(_rng, zero_obs)
+        policy_params = self._policy_network.init(policy_rng, zero_obs)
         zero_action = jnp.zeros(self._env.action_space(self._env_params).shape, dtype=jnp.int32)
-        wm_params = self._world_model.init(_rng, zero_obs, zero_action)
+        wm_params = self._world_model.init(wm_rng, zero_obs, zero_action)
 
-        if self._config["ANNEAL_LR"]:
-            tx = optax.chain(
-                optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
-                optax.adam(learning_rate=linear_schedule, eps=1e-5),
-            )
-        else:
-            tx = optax.chain(
-                optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
-                optax.adam(self._config["LR"], eps=1e-5),
-            )
+   
+        policy_tx = optax.chain(
+            optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
+            optax.adam(self._config["LR"], eps=1e-4),
+        )
+        wm_tx = optax.chain(
+            optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
+            optax.adam(self._config["LR"], eps=1e-5),
+        )
+
         policy_train_state = TrainState.create(
             apply_fn=self._policy_network.apply,
             params=policy_params,
-            tx=tx,
+            tx=policy_tx,
         )
         wm_train_state = TrainState.create(
             apply_fn=self._world_model.apply,
             params=wm_params,
-            tx=tx,
+            tx=wm_tx,
         )
 
         # INIT ENV
@@ -178,37 +178,29 @@ class PPOAgent():
         return (policy_train_state, wm_train_state, env_state, obsv, rng)
     
     def _env_step(self, runner_state, unused):
-            policy_train_state, wm_train_state, env_state, last_obs, rng = runner_state
+            policy_train_state, wm_train_state, env_state, o_tm1, rng = runner_state
 
             # SELECT ACTION
             rng, _rng = jax.random.split(rng)
-            pi, value = self._policy_network.apply(policy_train_state.params, last_obs)
+            pi, value = self._policy_network.apply(policy_train_state.params, o_tm1)
             action = pi.sample(seed=_rng)
             log_prob = pi.log_prob(action)
 
             # STEP ENV
             rng, _rng = jax.random.split(rng)
             rng_step = jax.random.split(_rng, self._config["NUM_ENVS"])
-            obsv, env_state, original_reward, done, info = jax.vmap(
+            o_t, env_state, original_reward, done, info = jax.vmap(
                 self._env.step, in_axes=(0, 0, 0, None)
             )(rng_step, env_state, action, self._env_params)
 
             # Calcuate the distance between the predicted and the actual observation
-            pred_o_t = self._world_model.apply(wm_train_state.params, last_obs, action)
-            dist = jnp.linalg.norm(obsv - pred_o_t, axis=-1)
-
-
-            # Calculate the internal reward
-            # TODO: Change this back
-            reward =  dist # 0.1*jnp.abs(obsv[..., 1]) + done #dist 
-            # jnp.abs(obsv[..., 1]) + done # jnp.square(dist) # - 0.1*jnp.log(jnp.square(dist))
-            # jax.debug.print("reward: {x}", x=reward, y=log_prob)
-            # reward = use_external_rewards*reward - (1-use_external_rewards)*jnp.log(jnp.square(dist))
+            pred_o_t = self._world_model.apply(wm_train_state.params, o_tm1, action)
+            reward = l2_norm_squared(o_t - pred_o_t)
 
             transition = Transition(
-                done, action, value, reward, log_prob, last_obs, obsv, info
+                done, action, value, reward, log_prob, o_tm1, o_t, info
             )
-            runner_state = (policy_train_state, wm_train_state, env_state, obsv, rng)
+            runner_state = (policy_train_state, wm_train_state, env_state, o_t, rng)
             return runner_state, (transition, env_state)
 
     # TRAIN LOOP
@@ -285,12 +277,12 @@ class PPOAgent():
                     )
                     actor_loss = -jnp.minimum(actor_loss1, actor_loss2)
                     actor_loss = actor_loss.mean()
-                    entropy_loss = pi.entropy().mean()
+                    entropy_loss = - pi.entropy().mean()
 
                     total_loss = (
                         actor_loss
                         + self._config["VF_COEF"] * value_loss
-                        - self._config["ENT_COEF"] * entropy_loss
+                        + self._config["ENT_COEF"] * entropy_loss
                     )
                     return total_loss, (value_loss, actor_loss, entropy_loss)
 
@@ -305,8 +297,12 @@ class PPOAgent():
                     # RERUN NETWORK
                     pred_o_t = self._world_model.apply(params, traj_batch.obs, traj_batch.action)
                     # CALCULATE WORLD MODEL LOSS
-                    # Don't train on the last step
-                    return (jnp.linalg.norm(traj_batch.next_obs - pred_o_t, axis=-1)*(1.0-traj_batch.done)).mean()
+                    # Don't train on the last step. The environment does not provide the step count.
+                    # Therefore the world model can not accurately predict the next observation when the 
+                    # end of the episode has been reached.
+                    # TODO: Potentially add a step count to the environment observation and remove not_last.
+                    not_last = 1.0-traj_batch.done
+                    return (not_last*l2_norm_squared(traj_batch.next_obs - pred_o_t)).mean()
                 grad_fn = jax.value_and_grad(_wm_loss_fn)
                 wm_loss, grads = grad_fn(
                     wm_train_state.params, traj_batch,
@@ -366,13 +362,14 @@ class PPOAgent():
                 if len(return_values) > 0:
                     avg_return = np.mean(return_values, axis=0)
                     # for t in range(len(timesteps)):
-                    print(f"Timestep: {np.mean(timesteps)}. Episodic return={np.mean(return_values)}")
-                    self._logger.write("avg_return", avg_return, step=timesteps[0])
-                    self._logger.write("total_loss", loss_info["total_loss"], step=timesteps[0])
-                    self._logger.write("value_loss", loss_info["value_loss"], step=timesteps[0])
-                    self._logger.write("actor_loss", loss_info["actor_loss"], step=timesteps[0])
-                    self._logger.write("entropy_loss", loss_info["entropy_loss"], step=timesteps[0])
-                    self._logger.write("wm_loss", loss_info["wm_loss"], step=timesteps[0])
+                    step = int(timesteps[0])
+                    print(f"Step: {step}. Episode return: {np.mean(return_values)}")
+                    self._logger.write("avg_return", avg_return, step=step)
+                    self._logger.write("total_loss", loss_info["total_loss"], step=step)
+                    self._logger.write("value_loss", loss_info["value_loss"], step=step)
+                    self._logger.write("actor_loss", loss_info["actor_loss"], step=step)
+                    self._logger.write("entropy_loss", loss_info["entropy_loss"], step=step)
+                    self._logger.write("wm_loss", loss_info["wm_loss"], step=step)
             jax.debug.callback(callback, metric, loss_info)
 
         runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
