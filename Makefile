@@ -9,6 +9,9 @@ build:
 	./ca_env/bin/pip install -r ./requirements.txt
 	./ca_env/bin/pip install jax==0.4.9
 	./ca_env/bin/pip install jaxlib==0.4.7+cuda11.cudnn82  -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-	
+
+tensorboard:
+	tensorboard --bind_all --logdir='./logs'
+
 sudo_clean:
 	sudo rm -r ./logs

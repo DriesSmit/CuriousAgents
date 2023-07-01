@@ -183,17 +183,17 @@ def compute_distance(arr1, arr2,  axis=-1):
 
 def normalise(arr):
     """Normalise an array using the L2 norm."""
-    norm = jnp.sqrt(jnp.sum(jnp.square(arr), axis=-1)).mean()
+    norm = jnp.sqrt(jnp.sum(jnp.square(arr), axis=-1))[..., None]
     return arr/norm
 
 def boyl_loss(pred_l_t, l_t):
     # CALCULATE WORLD MODEL LOSS
-    # TODO: Add these normalisation values back!
     norm_pred_l_t = pred_l_t # normalise(pred_l_t)
     norm_l_t = l_t # normalise(l_t)
 
     # Cap the world model loss
-    return l2_norm_squared(norm_pred_l_t-norm_l_t)
+    return compute_distance(norm_pred_l_t, norm_l_t)
+    # return l2_norm_squared(norm_pred_l_t-norm_l_t)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -211,7 +211,7 @@ class PPOAgent():
         "MAX_GRAD_NORM": 0.5,
         "TARGET_UPDATE_RATE": 0.001,
         "LATENT_SIZE": 64,
-        "REWARD_NORM_ALPHA": 0.999,
+        "REWARD_UPDATE_RATE": 0.001,
         "ACTIVATION": "relu",
         "ENV_NAME": env_name,
         "ANNEAL_LR": False,
@@ -356,7 +356,9 @@ class PPOAgent():
         # Set the reward to be the distance between the predicted and the actual observation
 
         reward = boyl_loss(pred_l_t, l_t)
-        reward_std = reward_std*self._config["REWARD_NORM_ALPHA"] + jnp.std(reward)*(1-self._config["REWARD_NORM_ALPHA"])
+        alpha = self._config["REWARD_UPDATE_RATE"]
+        # TODO: This is not really the std
+        reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
         reward = reward/reward_std
 
         info = {"step_rewards": original_reward, "wm_rewards": reward}
@@ -472,11 +474,12 @@ class PPOAgent():
                 new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
 
                 # UPDATE THE TARGET MODEL USING MOVING AVERAGES
+                alpha = self._config["TARGET_UPDATE_RATE"]
                 new_target_state = jax.tree_util.tree_map(
                     lambda target, online: (
-                        1 - self._config["TARGET_UPDATE_RATE"]
+                        1 - alpha
                     ) * target
-                    + self._config["TARGET_UPDATE_RATE"] * online,
+                    + alpha * online,
                     train_states.target,
                     train_states.online.params,
                 )

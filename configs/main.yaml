@@ -1,11 +1,11 @@
 defaults:
-  - agent: ppo_ff_world_model # ppo_boyl_explore # 
+  - agent: ppo_boyl_explore #  ppo_ff_world_model #
 
 name: CuriousAgents
-env_name: MountainCar-v0 # Maze-v0 # 
+env_name: Maze-v0 # MountainCar-v0 # 
 train: True
 load_state: False
 visualise: False
 log_dir: "./logs"
-training_steps: 2e7 # 8.8e6
-seed: 123456
+training_steps: 8.8e6 # 2e7 # 
+seed: 1234567
