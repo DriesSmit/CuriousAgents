@@ -16,3 +16,11 @@ import jax.numpy as jnp
 
 # Actions
 MOVES = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]])  # Up, Right, Down, Left
+
+# Minecraft blocks
+AIR = 0
+STEVE = 1
+WOODEN_LOG = 2
+COBBLESTONE = 3
+IRON_ORE = 4
+DIAMOND_ORE = 5

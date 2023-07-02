@@ -12,19 +12,14 @@ import distrax
 from jumanji.wrappers import AutoResetWrapper
 from curious_agents.environments.minecraft2d.generator import RandomGenerator
 from curious_agents.environments.minecraft2d.env import Minecraft2D
+from curious_agents.environments.minecraft2d.constants import DIAMOND_ORE
 
 # Turn the observation into an 3D array
 # Adapted from jumanji's process_observation function
 def process_observation(observation, time_limit):
     """Add the agent and the target to the walls array."""
-    agent = 2
-    target = 3
-    obs = observation.walls.astype(int)
-    obs = obs.at[tuple(observation.agent_position)].set(agent)
-    obs = obs.at[tuple(observation.target_position)].set(target)
-
-    # Determine the number of unique classes
-    n_classes = target + 1  # assuming classes start at 0
+    obs = observation.map.astype(int)
+    n_classes = DIAMOND_ORE + 1  # assuming classes start at 0
 
     # One-hot encode the observations
     one_hot_obs = jax.nn.one_hot(obs, n_classes)
@@ -573,7 +568,7 @@ class PPOAgent():
         runner_state = (train_states, env_state, last_obs, reward_std, rng, step)
         return runner_state
 
-    def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/Maze.gif"):
+    def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/Minecraft2D.gif"):
         # RUN ENV
         print("Running env..")
         env_state_seq = []

@@ -12,65 +12,105 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Callable, Tuple
 
 import chex
 import matplotlib
+import matplotlib.pyplot as plt
 from numpy.typing import NDArray
 
-from jumanji.environments.commons.maze_utils.maze_rendering import MazeViewer
 from curious_agents.environments.minecraft2d.types import State
+from curious_agents.environments.minecraft2d.constants import AIR, STEVE, WOODEN_LOG, COBBLESTONE, IRON_ORE, DIAMOND_ORE
 from jumanji.viewer import Viewer
+import jumanji
+import numpy as np
+from matplotlib.axes import Axes
+from matplotlib import image
+from scipy.ndimage import zoom
 
-EMPTY = 0
-WALL = 1
+class Minecraft2DEnvViewer(Viewer):
+    FONT_STYLE = "monospace"
+    FIGURE_SIZE = (10.0, 10.0)
 
-
-class MazeEnvViewer(MazeViewer):
-    AGENT = 2
-    TARGET = 3
-    COLORS = {
-        EMPTY: [1, 1, 1],  # White
-        WALL: [0, 0, 0],  # Black
-        AGENT: [0, 1, 0],  # Green
-        TARGET: [1, 0, 0],  # Red
-    }
-
-    def __init__(
-        self,
-        name: str,
-        render_mode: str = "human",
-        viewer: Optional[Viewer[State]] = None,
-    ) -> None:
-        """Viewer for the Maze environment.
+    def __init__(self, name: str, render_mode: str = "human", resolution=16) -> None:
+        """Viewer for a Minecraft environment.
 
         Args:
-            name: the window name to be used when initialising the matplotlib window.
+            name: the window name to be used when initialising the window.
             render_mode: the mode used to render the environment. Must be one of:
                 - "human": render the environment on screen.
                 - "rgb_array": return a numpy array frame representing the environment.
         """
-        super().__init__(name, render_mode)
+        self._name = name
+        # The animation must be stored in a variable that lives as long as the
+        # animation should run. Otherwise, the animation will get garbage-collected.
+        self._animation: Optional[matplotlib.animation.Animation] = None
 
-    def render(self, state: State) -> Optional[NDArray]:
-        """Render the given state of the `Maze` environment.
+        self._display: Callable[[plt.Figure], Optional[NDArray]]
+        if render_mode == "rgb_array":
+            self._display = self._display_rgb_array
+        elif render_mode == "human":
+            self._display = self._display_human
+        else:
+            raise ValueError(f"Invalid render mode: {render_mode}")
+        
+        self._resolution = resolution
+
+        # Load the images with the correct resolution
+        img_path = "curious_agents/environments/minecraft2d/images/"
+        self._images = self._load_and_resize_images(img_path, resolution)
+
+    def _load_and_resize_images(self, img_path, resolution):
+        img_indices = [STEVE, WOODEN_LOG, COBBLESTONE, IRON_ORE, DIAMOND_ORE]
+        img_labels = ['steve', 'wooden_log', 'cobblestone', 'iron_ore', 'diamond_ore']
+
+        # Load and resize images
+        images = {}
+        for index, label in zip(img_indices, img_labels):
+            # Load image with matplotlib's image.imread()
+            img_np = image.imread(f"{img_path}/{label}.png")
+
+            # Calculate the resize factor
+            resize_factor = np.array((resolution / img_np.shape[0], resolution / img_np.shape[1]))
+
+            # Resize the image
+            resized_img_np = zoom(img_np, (resize_factor[0], resize_factor[1], 1))
+
+            # Clip values to be within the valid range
+            resized_img_np = np.clip(resized_img_np, 0, 1)
+
+            # Add the resized image to the dictionary
+            images[index] = resized_img_np
+
+        return images
+
+
+    def render(self, state: chex.Array) -> Optional[NDArray]:
+        """
+        Render Minecraft state.
 
         Args:
-            state: the environment state to render.
+            state: the state to render.
+
+        Returns:
+            RGB array if the render_mode is RenderMode.RGB_ARRAY.
         """
-        maze = self._overlay_agent_and_target(state)
-        return super().render(maze)
+        self._clear_display()
+        fig, ax = self._get_fig_ax()
+        ax.clear()
+        self._add_grid_image(state.map, ax)
+        return self._display(fig)
 
     def animate(
         self,
-        states: Sequence[State],
+        states: Sequence[chex.Array],
         interval: int = 200,
         save_path: Optional[str] = None,
     ) -> matplotlib.animation.FuncAnimation:
-        """Create an animation from a sequence of environment states.
+        """Create an animation from a sequence of states.
 
         Args:
-            states: sequence of environment states corresponding to consecutive timesteps.
+            states: sequence of `Minecraft states` corresponding to consecutive timesteps.
             interval: delay between frames in milliseconds, default to 200.
             save_path: the path where the animation file should be saved. If it is None, the plot
                 will not be saved.
@@ -78,10 +118,73 @@ class MazeEnvViewer(MazeViewer):
         Returns:
             Animation that can be saved as a GIF, MP4, or rendered with HTML.
         """
-        mazes = [self._overlay_agent_and_target(state) for state in states]
-        return super().animate(mazes, interval, save_path)
+        fig, ax = plt.subplots(num=f"{self._name}Animation", figsize=self.FIGURE_SIZE)
+        plt.close(fig)
 
-    def _overlay_agent_and_target(self, state: State) -> chex.Array:
-        maze = state.walls.astype(int)
-        maze = maze.at[tuple(state.agent_position)].set(self.AGENT)
-        return maze.at[tuple(state.target_position)].set(self.TARGET)
+        def make_frame(map_index: int) -> None:
+            ax.clear()
+            map = states[map_index].map
+            self._add_grid_image(map, ax)
+
+        # Create the animation object.
+        self._animation = matplotlib.animation.FuncAnimation(
+            fig,
+            make_frame,
+            frames=len(states),
+            interval=interval,
+        )
+
+        # Save the animation as a gif.
+        if save_path:
+            self._animation.save(save_path)
+
+        return self._animation
+
+    def close(self) -> None:
+        plt.close(self._name)
+
+    def _get_fig_ax(self) -> Tuple[plt.Figure, plt.Axes]:
+        recreate = not plt.fignum_exists(self._name)
+        fig = plt.figure(self._name, figsize=self.FIGURE_SIZE)
+        if recreate:
+            if not plt.isinteractive():
+                fig.show()
+            ax = fig.add_subplot()
+        else:
+            ax = fig.get_axes()[0]
+        return fig, ax
+
+    def _add_grid_image(self, map: chex.Array, ax: Axes) -> image.AxesImage:
+        img = self._create_grid_image(map)
+        ax.set_axis_off()
+        return ax.imshow(img)
+
+    def _create_grid_image(self, map: chex.Array) -> NDArray:
+        length = len(map)
+        width = len(map[0])
+        res = self._resolution
+        img = np.ones((length*res, width*res, 4))
+        
+        # TODO: Draw blocks in the map
+        for i in range(length):
+            for j in range(width):
+                if map[i][j] != AIR:
+                    img[i*res:(i+1)*res, j*res:(j+1)*res] = self._images[int(map[i][j])]
+
+        return img
+
+    def _display_human(self, fig: plt.Figure) -> None:
+        if plt.isinteractive():
+            # Required to update render when using Jupyter Notebook.
+            fig.canvas.draw()
+            if jumanji.environments.is_colab():
+                plt.show(self._name)
+        else:
+            # Required to update render when not using Jupyter Notebook.
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+
+    def _display_rgb_array(self, fig: plt.Figure) -> NDArray:
+        fig.canvas.draw()
+        return np.asarray(fig.canvas.buffer_rgba())
+

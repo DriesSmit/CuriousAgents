@@ -37,33 +37,28 @@ class Position(NamedTuple):
 class State:
     """
     agent_position: current 2D Position of agent.
-    target_position: 2D Position of target cell.
-    walls: array (bool) whose values are `True` where walls are and `False` for empty cells.
+    agent_level: current level of agent.
+    map: array (bool) whose values are `True` where map are and `False` for empty cells.
     action_mask: array specifying which directions the agent can move in from its current position.
     step_count: (int32) step number of the episode.
     key: random key used for auto-reset.
     """
 
     agent_position: Position  # Position(row, col) each of shape ()
-    target_position: Position  # Position(row, col) each of shape ()
-    walls: chex.Array  # (num_rows, num_cols)
+    agent_level: jnp.int32  # ()
+    map: chex.Array  # (num_rows, num_cols)
     action_mask: chex.Array  # (4,)
     step_count: jnp.int32  # ()
     key: chex.PRNGKey  # (2,)
 
 
 class Observation(NamedTuple):
-    """The Maze observation that the agent sees.
+    """The Minecraft2D observation that the agent sees.
 
-    agent_position: current 2D Position of agent.
-    target_position: 2D Position of target cell.
-    walls: array (bool) whose values are `True` where walls are and `False` for empty cells.
+    map: array (bool) whose values are `True` where map are and `False` for empty cells.
     action_mask: array specifying which directions the agent can move in from its current position.
     step_count: (int32) step number of the episode.
     """
-
-    agent_position: Position  # Position(row, col) each of shape ()
-    target_position: Position  # Position(row, col) each of shape ()
-    walls: chex.Array  # (num_rows, num_cols)
+    map: chex.Array  # (num_rows, num_cols)
     action_mask: chex.Array  # (4,)
     step_count: jnp.int32  # ()

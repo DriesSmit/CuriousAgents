@@ -34,7 +34,7 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.visualise:
         # Visialise the Gymnax environment
-        agent.run_and_save_gif(runner_state)
+        agent.run_and_save_gif(runner_state, num_steps=cfg.visualisation_steps)
 
 if __name__ == "__main__":
     main()
