@@ -350,12 +350,11 @@ class PPOAgent():
         # Set the reward to be the distance between the predicted and the actual observation
 
         reward = boyl_loss(pred_l_t, l_t)
+        info = {"step_rewards": original_reward, "wm_rewards": reward}
+        
         alpha = self._config["REWARD_UPDATE_RATE"]
-        # TODO: This is not really the std
         reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
         reward = reward/reward_std
-
-        info = {"step_rewards": original_reward, "wm_rewards": reward}
 
         transition = Transition(
             done, action, value, reward, log_prob, last_obs, obs, info

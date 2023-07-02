@@ -48,7 +48,7 @@ class Minecraft2D(Environment[State]):
         self.num_rows = self.generator.num_rows
         self.num_cols = self.generator.num_cols
         self.shape = (self.num_rows, self.num_cols)
-        self.time_limit = time_limit or self.num_rows * self.num_cols
+        self.time_limit = time_limit or 4 * (self.num_rows + self.num_cols)
 
         # Create viewer used for rendering
         self._viewer = viewer or Minecraft2DEnvViewer("Minecraft2D", render_mode="human")
