@@ -90,7 +90,9 @@ class Minecraft2D(Environment[State]):
         return specs.DiscreteArray(4, name="action")
 
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
-
+        
+         # Fix the rng_key
+        key = jax.random.PRNGKey(0)
         state = self.generator(key)
 
         # Create the action mask and update the state
@@ -126,7 +128,11 @@ class Minecraft2D(Environment[State]):
         )
 
         # Check if the agent has moved to a new level.
-        agent_level = state.agent_level + jnp.array(state.map[agent_position.row, agent_position.col] > 1, int)
+        level_up = jnp.array(state.map[agent_position.row, agent_position.col] > STEVE, int)
+        agent_level = state.agent_level + level_up
+
+        # Compute the reward.
+        reward = level_up
 
         # Generate action mask to keep in the state for the next step and
         # to provide to the agent in the observation.
@@ -135,7 +141,7 @@ class Minecraft2D(Environment[State]):
         # Update the map.
         map = state.map.at[state.agent_position.row, state.agent_position.col].set(AIR)
         map = map.at[agent_position.row, agent_position.col].set(STEVE)
-
+        
         # Build the state.
         state = State(
             agent_position=agent_position,
@@ -154,9 +160,6 @@ class Minecraft2D(Environment[State]):
         no_actions_available = ~jnp.any(state.action_mask)
 
         done = at_max_level | time_limit_exceeded | no_actions_available
-
-        # Compute the reward.
-        reward = at_max_level
 
         # Return either a MID or a LAST timestep depending on done.
         timestep = jax.lax.cond(

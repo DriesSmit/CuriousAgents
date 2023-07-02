@@ -49,9 +49,9 @@ class ObservationEncoder(nn.Module):
 
         for _ in range(3):
             layer_out = nn.Conv(
-                features=32,  # increased the number of features
+                features=64,  # increased the number of features
                 kernel_size=(3, 3),
-                strides=(2, 2),
+                strides=(1, 1),
                 padding="SAME",  # added padding
                 kernel_init=orthogonal(np.sqrt(2)),
                 bias_init=constant(0.0),
@@ -187,8 +187,8 @@ def boyl_loss(pred_l_t, l_t):
     norm_l_t = l_t # normalise(l_t)
 
     # Cap the world model loss
-    return compute_distance(norm_pred_l_t, norm_l_t)
-    # return l2_norm_squared(norm_pred_l_t-norm_l_t)
+    # return compute_distance(norm_pred_l_t, norm_l_t)
+    return l2_norm_squared(norm_pred_l_t-norm_l_t)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -206,10 +206,9 @@ class PPOAgent():
         "MAX_GRAD_NORM": 0.5,
         "TARGET_UPDATE_RATE": 0.001,
         "LATENT_SIZE": 64,
-        "REWARD_UPDATE_RATE": 0.001,
+        # "REWARD_UPDATE_RATE": 0.001,
         "ACTIVATION": "relu",
         "ENV_NAME": env_name,
-        "ANNEAL_LR": False,
         "DEBUG": True,
     }
         self._config["MINIBATCH_SIZE"] = (
@@ -242,15 +241,6 @@ class PPOAgent():
         self._logger = None
 
     def init_state(self, rng):
-        # def linear_schedule(count):
-        #     frac = (
-        #         1.0
-        #         - (count // (self._config["NUM_MINIBATCHES"] * self._config["UPDATE_EPOCHS"]))
-        #         / self._config["NUM_UPDATES"]
-        #     )
-        #     return self._config["LR"] * frac
-        
-        
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
@@ -271,26 +261,15 @@ class PPOAgent():
         zero_latent = jnp.zeros(latent_size, dtype=jnp.float32)
         zero_action = jnp.zeros((), dtype=jnp.int32)
         wm_params = self._world_model.init(wm_rng, zero_latent, zero_action)
-
-        if self._config["ANNEAL_LR"]:
-            pass
-            # pol_tx = optax.chain(
-            #     optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
-            #     optax.adam(learning_rate=linear_schedule),
-            # )
-            # wm_tx = optax.chain(
-            #     optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
-            #     optax.adam(learning_rate=linear_schedule),
-            # )
-        else:
-            pol_tx = optax.chain(
-                optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
-                optax.adam(self._config["LR"]),
-            )
-            wm_tx = optax.chain(
-                optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
-                optax.adam(self._config["LR"]),
-            )
+      
+        pol_tx = optax.chain(
+            optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
+            optax.adam(self._config["LR"]),
+        )
+        wm_tx = optax.chain(
+            optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
+            optax.adam(self._config["LR"]),
+        )
         policy_train_state = TrainState.create(
             apply_fn=self._policy_network.apply,
             params=policy_params,
@@ -348,13 +327,12 @@ class PPOAgent():
         l_t = self._target_encoder.apply(train_states.target, obs)
 
         # Set the reward to be the distance between the predicted and the actual observation
-
         reward = boyl_loss(pred_l_t, l_t)
         info = {"step_rewards": original_reward, "wm_rewards": reward}
-        
-        alpha = self._config["REWARD_UPDATE_RATE"]
-        reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
-        reward = reward/reward_std
+
+        # alpha = self._config["REWARD_UPDATE_RATE"]
+        # reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
+        # reward = reward/reward_std
 
         transition = Transition(
             done, action, value, reward, log_prob, last_obs, obs, info
