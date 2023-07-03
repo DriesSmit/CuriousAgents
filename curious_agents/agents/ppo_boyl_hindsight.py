@@ -85,19 +85,15 @@ class ActorCritic(nn.Module):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, latent_in):
         if self.activation == "relu":
             activation = nn.relu
         else:
             activation = nn.tanh
 
-        policy_obs_encoder = ObservationEncoder(self.latent_size, self.activation)
-        
-        actor_mean = policy_obs_encoder(x)
-
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
+        )(latent_in)
         actor_mean = activation(actor_mean)
 
         actor_mean = nn.Dense(
@@ -248,17 +244,21 @@ class PPOAgent():
         env_state, timestep = jax.vmap(self._env.reset)(reset_rng)        
         obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
 
-        # INIT THE POLICY
-        rng, pol_rng, online_rng, target_rng, wm_rng = jax.random.split(rng, 5)
-        policy_params = self._policy_network.init(pol_rng, obs)
-        
+        # INIT RNG
+        rng, online_rng, target_rng, pol_rng, wm_rng = jax.random.split(rng, 5)
+
         # INIT THE ENCODERS
         online_params = self._online_encoder.init(online_rng, obs)
         target_params = self._target_encoder.init(target_rng, obs)
 
-        # INIT THE WORLD MODEL
+        # Init latent
         latent_size = self._online_encoder.latent_size
         zero_latent = jnp.zeros(latent_size, dtype=jnp.float32)
+
+        # INIT THE POLICY
+        policy_params = self._policy_network.init(pol_rng, obs, zero_latent)
+
+        # INIT THE WORLD MODEL
         zero_action = jnp.zeros((), dtype=jnp.int32)
         wm_params = self._world_model.init(wm_rng, zero_latent, zero_action)
       
@@ -302,9 +302,12 @@ class PPOAgent():
     def _env_step(self, runner_state, unused):
         train_states, env_state, last_obs, reward_std, rng, step = runner_state
 
+        # Calculate the latent state
+        l_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)
+
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
-        pi, value = self._policy_network.apply(train_states.policy.params, last_obs)
+        pi, value = self._policy_network.apply(train_states.policy.params, last_obs, l_tm1)
         action = pi.sample(seed=_rng)
         log_prob = pi.log_prob(action)
 
@@ -312,15 +315,14 @@ class PPOAgent():
         env_state, timestep = jax.vmap(
             self._env.step, in_axes=(0, 0)
         )(env_state, action)
+
+        # Turn the observation into an 3D array
+        obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
         
         done = timestep.last()
         original_reward = timestep.reward
-        
-        # Turn the observation into an 3D array
-        obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
 
         # Calcuate the distance between the predicted and the actual observation
-        l_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)
         pred_l_t = self._world_model.apply(train_states.world_model.params, l_tm1, action)
 
         # Get the latent state from the target network
@@ -351,7 +353,8 @@ class PPOAgent():
 
         # CALCULATE ADVANTAGE
         train_states, env_state, last_obs, reward_std, rng, step = runner_state
-        _, last_val = self._policy_network.apply(train_states.policy.params, last_obs)
+        last_latent = self._online_encoder.apply(train_states.online.params, last_obs)
+        _, last_val = self._policy_network.apply(train_states.policy.params, last_obs, last_latent)
 
         def _calculate_gae(traj_batch, last_val):
             def _get_advantages(gae_and_next_value, transition):
@@ -384,9 +387,10 @@ class PPOAgent():
             def _update_minbatch(train_states, batch_info):
                 traj_batch, advantages, targets = batch_info
 
-                def _agent_loss_fn(params, traj_batch, gae, targets):
+                def _agent_loss_fn(online_params, policy_params, world_model_params, traj_batch, gae, targets):
                     # RERUN NETWORKS
-                    pi, value = self._policy_network.apply(params, traj_batch.obs)
+                    l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
+                    pi, value = self._policy_network.apply(policy_params, traj_batch.obs, l_tm1)
                     log_prob = pi.log_prob(traj_batch.action)
                     
                     # CALCULATE VALUE LOSS
@@ -415,33 +419,29 @@ class PPOAgent():
                     actor_loss = actor_loss.mean()
                     entropy_loss = -pi.entropy().mean()
 
+                     # CALCULATE WORLD MODEL LOSS
+                    pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
+                    l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, traj_batch.next_obs))
+                    wm_loss = boyl_loss(pred_l_t, l_t).mean()
+
+                    # CALCULATE TOTAL LOSS
                     total_loss = (
                         actor_loss
                         + self._config["VF_COEF"] * value_loss
                         + self._config["ENT_COEF"] * entropy_loss
+                        + wm_loss
                     )
-                    return total_loss, (value_loss, actor_loss, entropy_loss)
+                    return total_loss, (value_loss, actor_loss, entropy_loss, wm_loss)
 
                 # UPDATE THE POLICY
-                grad_fn = jax.value_and_grad(_agent_loss_fn, has_aux=True)
-                pol_loss, grads = grad_fn(
-                    train_states.policy.params, traj_batch, advantages, targets
+                grad_fn = jax.value_and_grad(_agent_loss_fn, argnums=[0, 1, 2], has_aux=True)
+                losses, (online_grads, policy_grads, wm_grads) = grad_fn(
+                    train_states.online.params, train_states.policy.params,
+                    train_states.world_model.params, traj_batch, advantages, targets
                 )
-                new_policy_state = train_states.policy.apply_gradients(grads=grads)
 
-                # UPDATE THE WORLD MODEL
-                def _wm_loss_fn(online_params, world_model_params, traj_batch):
-                    # RERUN NETWORKS
-                    l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
-                    pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
-                    l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, traj_batch.next_obs))
-                    return boyl_loss(pred_l_t, l_t).mean()
-                grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
-                wm_loss, (online_grads, wm_grads), = grad_fn(
-                    train_states.online.params, train_states.world_model.params, traj_batch,
-                )
-                
                 new_online_state = train_states.online.apply_gradients(grads=online_grads)
+                new_policy_state = train_states.policy.apply_gradients(grads=policy_grads)                
                 new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
 
                 # UPDATE THE TARGET MODEL USING MOVING AVERAGES
@@ -471,7 +471,7 @@ class PPOAgent():
                     target=new_target_state,
                 )
 
-                return train_states, [pol_loss, wm_loss, distance]
+                return train_states, [losses, distance]
 
             train_states, traj_batch, advantages, targets, rng = update_state
             rng, _rng = jax.random.split(rng)
@@ -504,7 +504,7 @@ class PPOAgent():
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         ) 
 
-        (total_loss, (value_loss, actor_loss, entropy_loss)), wm_loss, target_dist = metrics
+        (total_loss, (value_loss, actor_loss, entropy_loss, wm_loss)), target_dist = metrics
         reward_std = runner_state[-3]
         metric_info = {
             "total_loss": total_loss.mean(),
