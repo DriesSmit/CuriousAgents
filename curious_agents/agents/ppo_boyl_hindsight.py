@@ -75,6 +75,7 @@ class ObservationEncoder(nn.Module):
         )(layer_out)
 
         # tanh activation the output for stability
+        # TODO: check if this is necessary
         layer_out = nn.tanh(layer_out)
 
         return layer_out
@@ -171,6 +172,11 @@ class Generator(nn.Module):
         layer_out = nn.Dense(self.z_dim, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             layer_out
         )
+
+        # tanh activation the output for stability
+        # TODO: check if this is necessary
+        layer_out = nn.tanh(layer_out)
+
         return layer_out
 
 class Discriminator(nn.Module):
@@ -200,6 +206,11 @@ class Discriminator(nn.Module):
         layer_out = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             layer_out
         )
+
+        # Limit the output to the range [-1, 1]
+        # TODO: Does this even work? It seem hacky.
+        # Remove this if possible.
+        layer_out = jnp.tanh(layer_out)*5
 
         # Exponentiate the output to get a probability
         layer_out = jnp.exp(layer_out)
@@ -264,6 +275,7 @@ class PPOAgent():
         "CLIP_EPS": 0.15,
         "ENT_COEF": 0.01,
         "VF_COEF": 0.5,
+        "DISC_IMP_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
         "TARGET_UPDATE_RATE": 0.001,
         "X_LATENT_SIZE": 64,
@@ -556,7 +568,6 @@ class PPOAgent():
                     # Get the diagonal of the matrix
                     sqeezed_scores = jnp.squeeze(scores)
                     diag_scores = jnp.diag(sqeezed_scores)
-
                     
                     ratios = diag_scores / (len(scores[0])*jnp.sum(sqeezed_scores, axis=-1))
 
@@ -578,7 +589,9 @@ class PPOAgent():
                     pred_x_t = self._world_model.apply(train_states.world_model.params, z_t, x_tm1, a_tm1)
                     wm_loss = boyl_loss(pred_x_t, x_t).mean()
 
-                    gen_loss = wm_loss - calc_disc_loss(train_states.discriminator.params, x_tm1, a_tm1, z_t)
+                    disc_loss = calc_disc_loss(train_states.discriminator.params, x_tm1, a_tm1, z_t)
+
+                    gen_loss = wm_loss - self._config["DISC_IMP_COEF"]* disc_loss
                     return gen_loss
                 
                 def _discriminator_loss_fn(discriminator_params, traj_batch):
