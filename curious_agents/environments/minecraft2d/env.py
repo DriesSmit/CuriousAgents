@@ -91,8 +91,7 @@ class Minecraft2D(Environment[State]):
 
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
         
-         # Fix the rng_key
-        key = jax.random.PRNGKey(0)
+        # Generate the environment state
         state = self.generator(key)
 
         # Create the action mask and update the state

@@ -33,7 +33,7 @@ def process_observation(observation, time_limit):
     return obs
 
 class ObservationEncoder(nn.Module):
-    latent_size: Sequence[int]
+    x_size: Sequence[int]
     activation: str = "relu"
 
     @nn.compact
@@ -69,7 +69,7 @@ class ObservationEncoder(nn.Module):
             layer_out = activation(layer_out)
 
         layer_out = nn.Dense(
-            self.latent_size, 
+            self.x_size, 
             kernel_init=orthogonal(1.0), 
             bias_init=constant(0.0),
         )(layer_out)
@@ -81,11 +81,11 @@ class ObservationEncoder(nn.Module):
     
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
-    latent_size: Sequence[int]
+    x_size: Sequence[int]
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, x, latent_in):
+    def __call__(self, x, x_tm1):
         if self.activation == "relu":
             activation = nn.relu
         else:
@@ -93,7 +93,7 @@ class ActorCritic(nn.Module):
 
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(latent_in)
+        )(x_tm1)
         actor_mean = activation(actor_mean)
 
         actor_mean = nn.Dense(
@@ -102,7 +102,7 @@ class ActorCritic(nn.Module):
 
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic_obs_encoder = ObservationEncoder(self.latent_size,  self.activation)
+        critic_obs_encoder = ObservationEncoder(self.x_size,  self.activation)
         critic = critic_obs_encoder(x)
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
@@ -119,16 +119,16 @@ class WorldModel(nn.Module):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, latent_in, action):
+    def __call__(self, z_t, x_tm1, a_tm1):
         if self.activation == "relu":
             activation = nn.relu
         else:
             activation = nn.tanh
         
         # One-hot encode the action
-        one_hot_action = jax.nn.one_hot(action, self.action_dim)
+        one_hot_action = jax.nn.one_hot(a_tm1, self.action_dim)
 
-        inp = jnp.concatenate([latent_in, one_hot_action], axis=-1)
+        inp = jnp.concatenate([z_t, x_tm1, one_hot_action], axis=-1)
 
         layer_out = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
@@ -138,9 +138,72 @@ class WorldModel(nn.Module):
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(layer_out)
         layer_out = activation(layer_out)
-        layer_out = nn.Dense(latent_in.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+        layer_out = nn.Dense(x_tm1.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             layer_out
         )
+        return layer_out
+
+class Generator(nn.Module):
+    z_dim: Sequence[int]
+    action_dim: Sequence[int]
+    activation: str = "relu"
+
+    @nn.compact
+    def __call__(self, x_tm1, a_tm1, x_t):
+        if self.activation == "relu":
+            activation = nn.relu
+        else:
+            activation = nn.tanh
+        
+        # One-hot encode the action
+        one_hot_action = jax.nn.one_hot(a_tm1, self.action_dim)
+
+        inp = jnp.concatenate([x_tm1, x_t, one_hot_action], axis=-1)
+
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(inp)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(layer_out)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(self.z_dim, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            layer_out
+        )
+        return layer_out
+
+class Discriminator(nn.Module):
+    action_dim: Sequence[int]
+    activation: str = "relu"
+
+    @nn.compact
+    def __call__(self, x_tm1, a_tm1, z_t):
+        if self.activation == "relu":
+            activation = nn.relu
+        else:
+            activation = nn.tanh
+        
+        # One-hot encode the action
+        one_hot_action = jax.nn.one_hot(a_tm1, self.action_dim)
+
+        inp = jnp.concatenate([z_t, x_tm1, one_hot_action], axis=-1)
+
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(inp)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(layer_out)
+        layer_out = activation(layer_out)
+        layer_out = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            layer_out
+        )
+
+        # Exponentiate the output to get a probability
+        layer_out = jnp.exp(layer_out)
+
         return layer_out
 
 class Transition(NamedTuple):
@@ -158,6 +221,8 @@ class BOYLTrainState(NamedTuple):
         online: jnp.array
         target: jnp.array
         world_model: jnp.array
+        generator: jnp.array
+        discriminator: jnp.array
 
 def flatten_params(params):
     """Flatten a dictionary of parameters into a vector."""
@@ -177,14 +242,14 @@ def normalise(arr):
     norm = jnp.sqrt(jnp.sum(jnp.square(arr), axis=-1))[..., None]
     return arr/norm
 
-def boyl_loss(pred_l_t, l_t):
+def boyl_loss(pred_x_t, x_t):
     # CALCULATE WORLD MODEL LOSS
-    norm_pred_l_t = pred_l_t # normalise(pred_l_t)
-    norm_l_t = l_t # normalise(l_t)
+    norm_pred_x_t = pred_x_t # normalise(pred_x_t)
+    norm_x_t = x_t # normalise(x_t)
 
     # Cap the world model loss
-    # return compute_distance(norm_pred_l_t, norm_l_t)
-    return l2_norm_squared(norm_pred_l_t-norm_l_t)
+    # return compute_distance(norm_pred_x_t, norm_x_t)
+    return l2_norm_squared(norm_pred_x_t-norm_x_t)
 
 class PPOAgent():
     def __init__(self, env_name) -> None:
@@ -201,7 +266,8 @@ class PPOAgent():
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "TARGET_UPDATE_RATE": 0.001,
-        "LATENT_SIZE": 64,
+        "X_LATENT_SIZE": 64,
+        "Z_LATENT_SIZE": 32,
         # "REWARD_UPDATE_RATE": 0.001,
         "ACTIVATION": "relu",
         "ENV_NAME": env_name,
@@ -218,20 +284,33 @@ class PPOAgent():
         # INIT NETWORKS
         num_actions = self._env.action_spec().num_values
         self._policy_network = ActorCritic(
-            num_actions, self._config["LATENT_SIZE"], activation=self._config["ACTIVATION"]
+            action_dim=num_actions, x_size=self._config["X_LATENT_SIZE"],
+            activation=self._config["ACTIVATION"]
         )
 
         self._online_encoder = ObservationEncoder(
-            latent_size=self._config["LATENT_SIZE"], activation=self._config["ACTIVATION"]
+            x_size=self._config["X_LATENT_SIZE"], activation=self._config["ACTIVATION"]
         )
 
         self._world_model = WorldModel(
-            num_actions, activation=self._config["ACTIVATION"]
+            action_dim=num_actions, activation=self._config["ACTIVATION"]
         )
 
         self._target_encoder = ObservationEncoder(
-            latent_size=self._config["LATENT_SIZE"], activation=self._config["ACTIVATION"]
+            x_size=self._config["X_LATENT_SIZE"], activation=self._config["ACTIVATION"]
         )
+
+        self._generator = Generator(
+            z_dim=self._config["Z_LATENT_SIZE"],
+            action_dim=num_actions, activation=self._config["ACTIVATION"], 
+        )
+
+        self._discriminator = Discriminator(
+            action_dim=num_actions,
+            activation=self._config["ACTIVATION"]
+        )
+
+        
 
         # INIT LOGGER
         self._logger = None
@@ -245,24 +324,30 @@ class PPOAgent():
         obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
 
         # INIT RNG
-        rng, online_rng, target_rng, pol_rng, wm_rng = jax.random.split(rng, 5)
+        rng, online_rng, target_rng, pol_rng, wm_rng, gen_rng, disc_rng = jax.random.split(rng, 7)
 
         # INIT THE ENCODERS
         online_params = self._online_encoder.init(online_rng, obs)
         target_params = self._target_encoder.init(target_rng, obs)
 
         # Init latent
-        latent_size = self._online_encoder.latent_size
-        zero_latent = jnp.zeros(latent_size, dtype=jnp.float32)
+        x_zero = jnp.zeros(self._config["X_LATENT_SIZE"], dtype=jnp.float32)
+        z_zero = jnp.zeros(self._config["Z_LATENT_SIZE"], dtype=jnp.float32)
 
         # INIT THE POLICY
-        policy_params = self._policy_network.init(pol_rng, obs, zero_latent)
+        policy_params = self._policy_network.init(pol_rng, obs, x_zero)
 
         # INIT THE WORLD MODEL
-        zero_action = jnp.zeros((), dtype=jnp.int32)
-        wm_params = self._world_model.init(wm_rng, zero_latent, zero_action)
+        a_zero = jnp.zeros((), dtype=jnp.int32)
+        wm_params = self._world_model.init(wm_rng, z_zero, x_zero, a_zero)
+
+        # INIT THE GENERATOR
+        gen_params = self._generator.init(gen_rng, x_zero, a_zero, x_zero)
+
+        # INIT THE DISCRIMINATOR
+        disc_params = self._discriminator.init(disc_rng, x_zero, a_zero, z_zero)
       
-        pol_tx = optax.chain(
+        pox_tx = optax.chain(
             optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
             optax.adam(self._config["LR"]),
         )
@@ -273,7 +358,7 @@ class PPOAgent():
         policy_train_state = TrainState.create(
             apply_fn=self._policy_network.apply,
             params=policy_params,
-            tx=pol_tx,
+            tx=pox_tx,
         )
 
         online_train_state = TrainState.create(
@@ -288,11 +373,25 @@ class PPOAgent():
             tx=wm_tx,
         )
 
+        gen_train_state = TrainState.create(
+            apply_fn=self._generator.apply,
+            params=gen_params,
+            tx=wm_tx,
+        )
+
+        dis_train_state = TrainState.create(
+            apply_fn=self._discriminator.apply,
+            params=disc_params,
+            tx=wm_tx,
+        )
+
         train_states = BOYLTrainState(
             policy=policy_train_state,
             online=online_train_state,
             target=target_params,
             world_model=wm_train_state,
+            generator=gen_train_state,
+            discriminator=dis_train_state,
         )
 
         step = 0
@@ -303,11 +402,11 @@ class PPOAgent():
         train_states, env_state, last_obs, reward_std, rng, step = runner_state
 
         # Calculate the latent state
-        l_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)
+        x_tm1 = self._online_encoder.apply(train_states.online.params, last_obs)
 
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
-        pi, value = self._policy_network.apply(train_states.policy.params, last_obs, l_tm1)
+        pi, value = self._policy_network.apply(train_states.policy.params, last_obs, x_tm1)
         action = pi.sample(seed=_rng)
         log_prob = pi.log_prob(action)
 
@@ -323,13 +422,12 @@ class PPOAgent():
         original_reward = timestep.reward
 
         # Calcuate the distance between the predicted and the actual observation
-        pred_l_t = self._world_model.apply(train_states.world_model.params, l_tm1, action)
-
-        # Get the latent state from the target network
-        l_t = self._target_encoder.apply(train_states.target, obs)
+        x_t = self._target_encoder.apply(train_states.target, obs)
+        z_t = self._generator.apply(train_states.generator.params, x_tm1, action, x_t) 
+        pred_x_t = self._world_model.apply(train_states.world_model.params, z_t, x_tm1, action)
 
         # Set the reward to be the distance between the predicted and the actual observation
-        reward = boyl_loss(pred_l_t, l_t)
+        reward = boyl_loss(pred_x_t, x_t)
         info = {"step_rewards": original_reward, "wm_rewards": reward}
 
         # alpha = self._config["REWARD_UPDATE_RATE"]
@@ -387,15 +485,19 @@ class PPOAgent():
             def _update_minbatch(train_states, batch_info):
                 traj_batch, advantages, targets = batch_info
 
-                def _agent_loss_fn(online_params, policy_params, world_model_params, traj_batch, gae, targets):
+                def _policy_loss_fn(online_params, policy_params, traj_batch, gae, targets):
+                    a_tm1 = traj_batch.action
+                    o_tm1 = traj_batch.obs
+                    v_tm1 = traj_batch.value
+
                     # RERUN NETWORKS
-                    l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
-                    pi, value = self._policy_network.apply(policy_params, traj_batch.obs, l_tm1)
-                    log_prob = pi.log_prob(traj_batch.action)
+                    x_tm1 = self._online_encoder.apply(online_params, o_tm1)
+                    pi, value = self._policy_network.apply(policy_params, o_tm1, x_tm1)
+                    log_prob = pi.log_prob(a_tm1)
                     
                     # CALCULATE VALUE LOSS
-                    value_pred_clipped = traj_batch.value + (
-                        value - traj_batch.value
+                    value_pred_clipped = v_tm1 + (
+                        value - v_tm1
                     ).clip(-self._config["CLIP_EPS"], self._config["CLIP_EPS"])
                     value_losses = jnp.square(value - targets)
                     value_losses_clipped = jnp.square(value_pred_clipped - targets)
@@ -419,30 +521,113 @@ class PPOAgent():
                     actor_loss = actor_loss.mean()
                     entropy_loss = -pi.entropy().mean()
 
-                     # CALCULATE WORLD MODEL LOSS
-                    pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
-                    l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, traj_batch.next_obs))
-                    wm_loss = boyl_loss(pred_l_t, l_t).mean()
-
                     # CALCULATE TOTAL LOSS
                     total_loss = (
                         actor_loss
                         + self._config["VF_COEF"] * value_loss
                         + self._config["ENT_COEF"] * entropy_loss
-                        + wm_loss
                     )
-                    return total_loss, (value_loss, actor_loss, entropy_loss, wm_loss)
+                    return total_loss, (value_loss, actor_loss, entropy_loss)
+                
+                def _wm_loss_fn(online_params, world_model_params, traj_batch):
+                    a_tm1 = traj_batch.action
+                    o_tm1 = traj_batch.obs
+                    o_t = traj_batch.next_obs
 
-                # UPDATE THE POLICY
-                grad_fn = jax.value_and_grad(_agent_loss_fn, argnums=[0, 1, 2], has_aux=True)
-                losses, (online_grads, policy_grads, wm_grads) = grad_fn(
+                    # RERUN NETWORKS
+                    x_tm1 = self._online_encoder.apply(online_params, o_tm1)
+                    x_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, o_t))
+                    z_t = self._generator.apply(train_states.generator.params, x_tm1, a_tm1, x_t)
+                    # TODO: Maybe add noise to z_t. This might encourage the world model to
+                    # rely as much as possible on x_tm1 and a_tm1, and as little as possible
+                    # on z_t.
+                    pred_x_t = self._world_model.apply(world_model_params, z_t, x_tm1, a_tm1)
+                    return boyl_loss(pred_x_t, x_t).mean()
+                
+                def calc_disc_loss(params, x_tm1, a_tm1, z_t):
+                    # Entry fuction
+                    entry_fn = jax.vmap(self._discriminator.apply, in_axes=(None, None, None, 0))
+
+                    # Batch function
+                    batch_fn = jax.vmap(entry_fn, in_axes=(None, 0, 0, None))
+
+                    scores = batch_fn(params, x_tm1, a_tm1, z_t)
+                    
+                    # Get the diagonal of the matrix
+                    sqeezed_scores = jnp.squeeze(scores)
+                    diag_scores = jnp.diag(sqeezed_scores)
+
+                    
+                    ratios = diag_scores / (len(scores[0])*jnp.sum(sqeezed_scores, axis=-1))
+
+                    log_ratios = jnp.log(ratios)
+
+                    return -jnp.mean(log_ratios)
+
+                def _generator_loss_fn(generator_params, traj_batch):
+                    # TODO: There is a lot of code duplication here. Can we not 
+                    # somehow combine this with the other loss functions?
+                    a_tm1 = traj_batch.action
+                    o_tm1 = traj_batch.obs
+                    o_t = traj_batch.next_obs
+                    x_tm1 = jax.lax.stop_gradient(self._online_encoder.apply(train_states.online.params, o_tm1))
+                    x_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, o_t))
+                    z_t = self._generator.apply(generator_params, x_tm1, a_tm1, x_t)
+
+                    # CALCULATE THE WORLD MODEL LOSS
+                    pred_x_t = self._world_model.apply(train_states.world_model.params, z_t, x_tm1, a_tm1)
+                    wm_loss = boyl_loss(pred_x_t, x_t).mean()
+
+                    gen_loss = wm_loss - calc_disc_loss(train_states.discriminator.params, x_tm1, a_tm1, z_t)
+                    return gen_loss
+                
+                def _discriminator_loss_fn(discriminator_params, traj_batch):
+                    a_tm1 = traj_batch.action
+                    o_tm1 = traj_batch.obs
+                    o_t = traj_batch.next_obs
+                    x_tm1 = jax.lax.stop_gradient(self._online_encoder.apply(train_states.online.params, o_tm1))
+                    x_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, o_t))
+                    z_t = jax.lax.stop_gradient(self._generator.apply(train_states.generator.params, x_tm1, a_tm1, x_t))
+                    disc_loss = calc_disc_loss(discriminator_params, x_tm1, a_tm1, z_t)
+                    return disc_loss
+
+                # UPDATE THE POLICY NETWORKS
+                grad_fn = jax.value_and_grad(_policy_loss_fn, argnums=[0, 1], has_aux=True)
+                losses, (online_grads_p, policy_grads) = grad_fn(
                     train_states.online.params, train_states.policy.params,
-                    train_states.world_model.params, traj_batch, advantages, targets
+                    traj_batch, advantages, targets
                 )
+                new_policy_state = train_states.policy.apply_gradients(grads=policy_grads)  
 
+                # UPDATE THE ONLINE AND WORLD MODEL NETWORKS
+                grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
+                wm_loss, (online_grads_w, wm_grads) = grad_fn(
+                    train_states.online.params, train_states.world_model.params,
+                    traj_batch,
+                )
+                losses += (wm_loss,)
+                # Is there a way to do this in one go?
+                online_grads = jax.tree_util.tree_map(lambda x, y: (x + y) / 2, online_grads_p, online_grads_w)
                 new_online_state = train_states.online.apply_gradients(grads=online_grads)
-                new_policy_state = train_states.policy.apply_gradients(grads=policy_grads)                
                 new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
+
+                # UPDATE THE GENERATOR
+                grad_fn = jax.value_and_grad(_generator_loss_fn)
+                gen_loss, gen_grads = grad_fn(
+                    train_states.generator.params,
+                    traj_batch,
+                )
+                losses += (gen_loss,)
+                new_gen_state = train_states.generator.apply_gradients(grads=gen_grads)
+
+                # UPDATE THE DISCRIMINATOR
+                grad_fn = jax.value_and_grad(_discriminator_loss_fn)
+                disc_loss, disc_grads = grad_fn(
+                    train_states.discriminator.params,
+                    traj_batch,
+                )
+                losses += (disc_loss,)
+                new_disc_state = train_states.discriminator.apply_gradients(grads=disc_grads)
 
                 # UPDATE THE TARGET MODEL USING MOVING AVERAGES
                 alpha = self._config["TARGET_UPDATE_RATE"]
@@ -467,8 +652,10 @@ class PPOAgent():
                 train_states = BOYLTrainState(
                     policy=new_policy_state,
                     online=new_online_state,
-                    world_model=new_wm_state,
                     target=new_target_state,
+                    world_model=new_wm_state,
+                    generator=new_gen_state,
+                    discriminator=new_disc_state,
                 )
 
                 return train_states, [losses, distance]
@@ -504,7 +691,7 @@ class PPOAgent():
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         ) 
 
-        (total_loss, (value_loss, actor_loss, entropy_loss, wm_loss)), target_dist = metrics
+        (total_loss, (value_loss, actor_loss, entropy_loss), wm_loss, gen_loss, disc_loss), target_dist = metrics
         reward_std = runner_state[-3]
         metric_info = {
             "total_loss": total_loss.mean(),
@@ -512,6 +699,8 @@ class PPOAgent():
             "actor_loss": actor_loss.mean(),
             "entropy_loss": entropy_loss.mean(),
             "wm_loss": wm_loss.mean(),
+            "gen_loss": gen_loss.mean(),
+            "disc_loss": disc_loss.mean(),
             "target_dist": target_dist.mean(),
             "reward_std": reward_std,
         }
@@ -538,6 +727,8 @@ class PPOAgent():
                 self._logger.write("actor_loss", metric_info["actor_loss"], step=step)
                 self._logger.write("entropy_loss", metric_info["entropy_loss"], step=step)
                 self._logger.write("wm_loss", metric_info["wm_loss"], step=step)
+                self._logger.write("gen_loss", metric_info["gen_loss"], step=step)
+                self._logger.write("disc_loss", metric_info["disc_loss"], step=step)
                 self._logger.write("target_distance", metric_info["target_dist"], step=step)
                 self._logger.write("reward_std", metric_info["reward_std"], step=step)
             jax.debug.callback(callback, episode_rewards, episode_wm_rewards, metric_info, step)
