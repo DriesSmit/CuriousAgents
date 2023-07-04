@@ -86,7 +86,7 @@ class ActorCritic(nn.Module):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, x, x_tm1):
+    def __call__(self, o_tm1, x_tm1):
         if self.activation == "relu":
             activation = nn.relu
         else:
@@ -104,7 +104,7 @@ class ActorCritic(nn.Module):
         pi = distrax.Categorical(logits=actor_mean)
 
         critic_obs_encoder = ObservationEncoder(self.x_size,  self.activation)
-        critic = critic_obs_encoder(x)
+        critic = critic_obs_encoder(o_tm1)
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(critic)
@@ -120,7 +120,7 @@ class WorldModel(nn.Module):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, z_t, x_tm1, a_tm1):
+    def __call__(self, x_tm1, a_tm1, z_t):
         if self.activation == "relu":
             activation = nn.relu
         else:
@@ -351,7 +351,7 @@ class PPOAgent():
 
         # INIT THE WORLD MODEL
         a_zero = jnp.zeros((), dtype=jnp.int32)
-        wm_params = self._world_model.init(wm_rng, z_zero, x_zero, a_zero)
+        wm_params = self._world_model.init(wm_rng, x_zero, a_zero, z_zero)
 
         # INIT THE GENERATOR
         gen_params = self._generator.init(gen_rng, x_zero, a_zero, x_zero)
@@ -419,13 +419,13 @@ class PPOAgent():
         # SELECT ACTION
         rng, _rng = jax.random.split(rng)
         pi, value = self._policy_network.apply(train_states.policy.params, last_obs, x_tm1)
-        action = pi.sample(seed=_rng)
-        log_prob = pi.log_prob(action)
+        a_t = pi.sample(seed=_rng)
+        log_prob = pi.log_prob(a_t)
 
         # STEP ENV
         env_state, timestep = jax.vmap(
             self._env.step, in_axes=(0, 0)
-        )(env_state, action)
+        )(env_state, a_t)
 
         # Turn the observation into an 3D array
         obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
@@ -435,8 +435,8 @@ class PPOAgent():
 
         # Calcuate the distance between the predicted and the actual observation
         x_t = self._target_encoder.apply(train_states.target, obs)
-        z_t = self._generator.apply(train_states.generator.params, x_tm1, action, x_t) 
-        pred_x_t = self._world_model.apply(train_states.world_model.params, z_t, x_tm1, action)
+        z_t = self._generator.apply(train_states.generator.params, x_tm1, a_t, x_t) 
+        pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_t, z_t)
 
         # Set the reward to be the distance between the predicted and the actual observation
         reward = boyl_loss(pred_x_t, x_t)
@@ -447,7 +447,7 @@ class PPOAgent():
         # reward = reward/reward_std
 
         transition = Transition(
-            done, action, value, reward, log_prob, last_obs, obs, info
+            done, a_t, value, reward, log_prob, last_obs, obs, info
         )
         
         # Step once for every environment.
@@ -553,7 +553,7 @@ class PPOAgent():
                     # TODO: Maybe add noise to z_t. This might encourage the world model to
                     # rely as much as possible on x_tm1 and a_tm1, and as little as possible
                     # on z_t.
-                    pred_x_t = self._world_model.apply(world_model_params, z_t, x_tm1, a_tm1)
+                    pred_x_t = self._world_model.apply(world_model_params, x_tm1, a_tm1, z_t)
                     return boyl_loss(pred_x_t, x_t).mean()
                 
                 def calc_disc_loss(params, x_tm1, a_tm1, z_t):
@@ -569,7 +569,7 @@ class PPOAgent():
                     sqeezed_scores = jnp.squeeze(scores)
                     diag_scores = jnp.diag(sqeezed_scores)
                     
-                    ratios = diag_scores / (len(scores[0])*jnp.sum(sqeezed_scores, axis=-1))
+                    ratios = diag_scores / (jnp.sum(sqeezed_scores, axis=-1) / len(scores[0]))
 
                     log_ratios = jnp.log(ratios)
 
@@ -586,7 +586,7 @@ class PPOAgent():
                     z_t = self._generator.apply(generator_params, x_tm1, a_tm1, x_t)
 
                     # CALCULATE THE WORLD MODEL LOSS
-                    pred_x_t = self._world_model.apply(train_states.world_model.params, z_t, x_tm1, a_tm1)
+                    pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_tm1, z_t)
                     wm_loss = boyl_loss(pred_x_t, x_t).mean()
 
                     disc_loss = calc_disc_loss(train_states.discriminator.params, x_tm1, a_tm1, z_t)
