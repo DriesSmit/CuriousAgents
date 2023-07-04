@@ -8,5 +8,5 @@ load_state: False
 visualise: True
 visualisation_steps: 200
 log_dir: "./logs"
-training_steps: 1e6 # 8.8e6 # 2e7 # 
-seed: 1234
+training_steps: 5e7 #5e6 # 8.8e6 # 2e7 # 
+seed: 12345
