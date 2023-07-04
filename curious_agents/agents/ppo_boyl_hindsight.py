@@ -75,7 +75,8 @@ class ObservationEncoder(nn.Module):
         )(layer_out)
 
         # tanh activation the output for stability
-        # TODO: check if this is necessary
+        # TODO: Normalise the features when using it in the world model loss
+        # instead of using this tanh function.
         layer_out = nn.tanh(layer_out)
 
         return layer_out
@@ -207,10 +208,11 @@ class Discriminator(nn.Module):
             layer_out
         )
 
-        # Limit the output to the range [-1, 1]
+
         # TODO: Does this even work? It seem hacky.
         # Remove this if possible.
         layer_out = jnp.tanh(layer_out)*5
+
 
         # Exponentiate the output to get a probability
         layer_out = jnp.exp(layer_out)
@@ -255,6 +257,8 @@ def normalise(arr):
 
 def boyl_loss(pred_x_t, x_t):
     # CALCULATE WORLD MODEL LOSS
+    # TODO: Try to add this back and romove the tanh on the 
+    # encoder output side.
     norm_pred_x_t = pred_x_t # normalise(pred_x_t)
     norm_x_t = x_t # normalise(x_t)
 
@@ -442,6 +446,7 @@ class PPOAgent():
         reward = boyl_loss(pred_x_t, x_t)
         info = {"step_rewards": original_reward, "wm_rewards": reward}
 
+        # TODO: Try adding this back in for training stablity.
         # alpha = self._config["REWARD_UPDATE_RATE"]
         # reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
         # reward = reward/reward_std
