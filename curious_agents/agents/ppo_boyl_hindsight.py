@@ -13,6 +13,7 @@ from jumanji.wrappers import AutoResetWrapper
 from curious_agents.environments.minecraft2d.generator import RandomGenerator
 from curious_agents.environments.minecraft2d.env import Minecraft2D
 from curious_agents.environments.minecraft2d.constants import DIAMOND_ORE
+import time
 
 # Turn the observation into an 3D array
 # Adapted from jumanji's process_observation function
@@ -277,7 +278,7 @@ class PPOAgent():
         "GAMMA": 0.99,
         "GAE_LAMBDA": 0.95,
         "CLIP_EPS": 0.15,
-        "ENT_COEF": 0.01,
+        "ENT_COEF": 0.02,
         "VF_COEF": 0.5,
         "DISC_IMP_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
@@ -326,10 +327,13 @@ class PPOAgent():
             activation=self._config["ACTIVATION"]
         )
 
-        
+        self._last_time = time.time()
 
         # INIT LOGGER
         self._logger = None
+
+        # INIT MANAGER
+        self._manager = None
 
     def init_state(self, rng):
         # INIT ENV
@@ -443,13 +447,15 @@ class PPOAgent():
         pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_t, z_t)
 
         # Set the reward to be the distance between the predicted and the actual observation
+        # TODO: Clip this reward to be within one standard deviation of the mean. This 
+        # should help with training stablity.
         reward = boyl_loss(pred_x_t, x_t)
         info = {"step_rewards": original_reward, "wm_rewards": reward}
 
         # TODO: Try adding this back in for training stablity.
-        alpha = self._config["REWARD_UPDATE_RATE"]
-        reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
-        reward = reward/reward_std
+        # alpha = self._config["REWARD_UPDATE_RATE"]
+        # reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
+        # reward = reward/reward_std
 
         transition = Transition(
             done, a_t, value, reward, log_prob, last_obs, obs, info
@@ -625,8 +631,11 @@ class PPOAgent():
                 )
                 losses += (wm_loss,)
                 # Is there a way to do this in one go?
-                online_grads = jax.tree_util.tree_map(lambda x, y: (x + y) / 2, online_grads_p, online_grads_w)
-                new_online_state = train_states.online.apply_gradients(grads=online_grads)
+                # TODO: Delete the commented out code below.
+                # online_grads = jax.tree_util.tree_map(lambda x, y: (x + y) / 2, online_grads_p, online_grads_w)
+                # new_online_state = train_states.online.apply_gradients(grads=online_grads_p)
+                new_online_state = train_states.online.apply_gradients(grads=online_grads_w)
+
                 new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
 
                 # UPDATE THE GENERATOR
@@ -737,7 +746,8 @@ class PPOAgent():
         }
 
         rng = update_state[-1]
-        def callback( metric_info, step):
+        def callback(runner_state, metric_info, step):
+            # start = time.time()
             print(
                 "Timestep: {}. Episode return: {:.2f}.".format(
                     step, metric_info["episode_rewards"]
@@ -755,9 +765,18 @@ class PPOAgent():
             self._logger.write("disc_loss", metric_info["disc_loss"], step=step)
             self._logger.write("target_distance", metric_info["target_dist"], step=step)
             self._logger.write("reward_std", metric_info["reward_std"], step=step)
-        jax.debug.callback(callback, metric_info, step)
+
+            # Save the model
+            self._manager.save(runner_state)
+
+            # end = time.time()
+
+            # print("Time in callback: {:.2f}".format(end-start), "Time outside callback: {:.2f}".format(start-self._last_time))
+            # self._last_time = time.time()
 
         runner_state = (train_states, env_state, last_obs, reward_std, rng, step)
+        jax.debug.callback(callback, runner_state, metric_info, step)
+
         return runner_state
 
     def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/Minecraft2D.gif"):
@@ -776,10 +795,13 @@ class PPOAgent():
         print("Visualizing env..")
         self._env.animate(env_state_seq, interval=150, save_path=output_loc)
 
-    def run(self, runner_state, logger, external_rewards=True, steps=10000, evaluation=False):
+    def run(self, runner_state, logger, manager, external_rewards=True, steps=10000, evaluation=False):
 
         # Set the loger
         self._logger = logger
+
+        # Set the manager
+        self._manager = manager
 
         # TRAIN LOOP
         num_updates = steps // self._config["NUM_ENVS"] // self._config["NUM_STEPS"]

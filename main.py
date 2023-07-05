@@ -27,7 +27,7 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.train:
         # Run the agent in exploration mode
-        runner_state = agent.run(runner_state, logger, steps=cfg.training_steps)
+        runner_state = agent.run(runner_state, logger, manager, steps=cfg.training_steps)
         
         # Save runner state
         manager.save(runner_state)
