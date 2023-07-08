@@ -9,11 +9,14 @@ from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple
 from flax.training.train_state import TrainState
 import distrax
-from jumanji.wrappers import AutoResetWrapper
+import chex
+from jumanji.wrappers import AutoResetWrapper, Wrapper
 from curious_agents.environments.minecraft2d.generator import RandomGenerator
 from curious_agents.environments.minecraft2d.env import Minecraft2D
 from curious_agents.environments.minecraft2d.constants import DIAMOND_ORE
+from curious_agents.environments.minecraft2d.types import State
 import time
+from flax import struct
 
 # Turn the observation into an 3D array
 # Adapted from jumanji's process_observation function
@@ -32,6 +35,68 @@ def process_observation(observation, time_limit):
     obs = jnp.concatenate([one_hot_obs, step_count[..., None]], axis=-1)
 
     return obs
+
+@struct.dataclass
+class LogEnvState:
+    env_state: State
+    episode_returns: float
+    wm_episode_returns: float
+    last_episode_returns: float
+    last_wm_episode_returns: float
+    episode_lengths: int
+    last_episode_lengths: int
+
+
+class LogWrapper(Wrapper):
+    """Log the episode returns and lengths."""
+
+    def reset(self, key: chex.PRNGKey):
+        state, timestep = self._env.reset(key)
+        state = LogEnvState(state, 0.0, 0.0, 0.0, 0.0, 0, 0)
+        return state, timestep
+    
+    def step(self, state, action):
+        new_env_state, timestep = self._env.step(state.env_state, action)
+        state = state.replace(env_state=new_env_state)
+        return state, timestep
+
+    def _update_reward_info(
+        self,
+        state,
+        reward: jnp.ndarray,
+        wm_reward: jnp.ndarray,
+        done: jnp.ndarray,
+    ):
+
+        new_episode_return = state.episode_returns + reward
+        new_wm_episode_return = state.wm_episode_returns + wm_reward
+        new_episode_length = state.episode_lengths + 1
+
+        not_done = (1 - done)
+
+        state = LogEnvState(
+            env_state=state.env_state,
+            episode_returns=new_episode_return * not_done,
+            wm_episode_returns=new_wm_episode_return * not_done,
+            episode_lengths=new_episode_length * not_done,
+            last_episode_returns=state.last_episode_returns
+            * not_done
+            + new_episode_return * done,
+            last_wm_episode_returns=state.last_wm_episode_returns
+            * not_done
+             + new_wm_episode_return * done,
+            last_episode_lengths=state.last_episode_lengths
+            * not_done
+            + new_episode_length * done,
+        )
+
+        info = {
+            "episode_returns": state.last_episode_returns,
+            "wm_episode_returns": state.last_wm_episode_returns,
+            "episode_lengths": state.last_episode_lengths,
+        }
+
+        return state, info
 
 class ObservationEncoder(nn.Module):
     x_size: Sequence[int]
@@ -297,6 +362,7 @@ class PPOAgent():
         generator = RandomGenerator(num_rows=5, num_cols=5)
         self._env = Minecraft2D(generator=generator)        
         self._env = AutoResetWrapper(self._env)
+        self._env = LogWrapper(self._env)
 
         # INIT NETWORKS
         num_actions = self._env.action_spec().num_values
@@ -428,6 +494,7 @@ class PPOAgent():
         rng, _rng = jax.random.split(rng)
         pi, value = self._policy_network.apply(train_states.policy.params, last_obs, x_tm1)
         a_t = pi.sample(seed=_rng)
+
         log_prob = pi.log_prob(a_t)
 
         # STEP ENV
@@ -450,7 +517,11 @@ class PPOAgent():
         # TODO: Clip this reward to be within one standard deviation of the mean. This 
         # should help with training stablity.
         reward = boyl_loss(pred_x_t, x_t)
-        info = {"step_rewards": original_reward, "wm_rewards": reward}
+
+        env_state, info = self._env._update_reward_info(env_state, 
+                                                        reward=original_reward, 
+                                                        wm_reward=reward, 
+                                                        done=done)
 
         # TODO: Try adding this back in for training stablity.
         # alpha = self._config["REWARD_UPDATE_RATE"]
@@ -722,13 +793,11 @@ class PPOAgent():
         reward_std = runner_state[-3]
         
         train_states = update_state[0]
-        step_rewards = traj_batch.info["step_rewards"]
-        wm_rewards = traj_batch.info["wm_rewards"]
-
-        episode_rewards = jnp.sum(step_rewards) / jnp.sum(traj_batch.done)
-        episode_max_rewards = jnp.max(jnp.sum(step_rewards, axis=0) / jnp.sum(traj_batch.done, axis=0))
-        episode_wm_rewards = jnp.sum(wm_rewards) / jnp.sum(traj_batch.done)
-
+        episode_returns = jnp.mean(traj_batch.info["episode_returns"])
+        episode_max_returns = jnp.max(traj_batch.info["episode_returns"])
+        episode_wm_returns = jnp.mean(traj_batch.info["wm_episode_returns"])
+        episode_wm_max_returns = jnp.max(traj_batch.info["wm_episode_returns"])
+        episode_lengths = jnp.mean(traj_batch.info["episode_lengths"])
         
         metric_info = {
             "total_loss": total_loss.mean(),
@@ -740,9 +809,11 @@ class PPOAgent():
             "disc_loss": disc_loss.mean(),
             "target_dist": target_dist.mean(),
             "reward_std": reward_std,
-            "episode_rewards": episode_rewards,
-            "episode_max_rewards": episode_max_rewards,
-            "episode_wm_rewards": episode_wm_rewards,
+            "episode_returns": episode_returns,
+            "episode_max_returns": episode_max_returns,
+            "episode_wm_returns": episode_wm_returns,
+            "episode_wm_max_returns": episode_wm_max_returns,
+            "episode_lengths": episode_lengths,
         }
 
         rng = update_state[-1]
@@ -750,21 +821,11 @@ class PPOAgent():
             # start = time.time()
             print(
                 "Timestep: {}. Episode return: {:.2f}.".format(
-                    step, metric_info["episode_rewards"]
+                    step, metric_info["episode_returns"]
                 ))
             
-            self._logger.write("episode_rewards", metric_info["episode_rewards"], step=step)
-            self._logger.write("episode_max_rewards", metric_info["episode_max_rewards"], step=step)
-            self._logger.write("episode_wm_rewards", metric_info["episode_wm_rewards"], step=step)
-            self._logger.write("total_loss", metric_info["total_loss"], step=step)
-            self._logger.write("value_loss", metric_info["value_loss"], step=step)
-            self._logger.write("actor_loss", metric_info["actor_loss"], step=step)
-            self._logger.write("entropy_loss", metric_info["entropy_loss"], step=step)
-            self._logger.write("wm_loss", metric_info["wm_loss"], step=step)
-            self._logger.write("gen_loss", metric_info["gen_loss"], step=step)
-            self._logger.write("disc_loss", metric_info["disc_loss"], step=step)
-            self._logger.write("target_distance", metric_info["target_dist"], step=step)
-            self._logger.write("reward_std", metric_info["reward_std"], step=step)
+            for key, value in metric_info.items():
+                self._logger.write(key, value, step=step)
 
             # Save the model
             self._manager.save(runner_state)
@@ -786,7 +847,7 @@ class PPOAgent():
         jitted_step_fn = jax.jit(self._env_step)
         for _ in range(num_steps):
             runner_state, _ = jitted_step_fn(runner_state, None)
-            env_state_seq.append(runner_state[1])
+            env_state_seq.append(runner_state[1].env_state)
 
         # Take first run for each array using JAX treemap
         env_state_seq = jax.tree_map(lambda x: x[0], env_state_seq)
