@@ -354,6 +354,7 @@ class PPOAgent():
         "ACTIVATION": "relu",
         "ENV_NAME": env_name,
         "DEBUG": True,
+        "SAVE_INTERVAL": 100,
     }
         self._config["MINIBATCH_SIZE"] = (
             self._config["NUM_ENVS"] * self._config["NUM_STEPS"] // self._config["NUM_MINIBATCHES"]
@@ -850,8 +851,9 @@ class PPOAgent():
             for key, value in metric_info.items():
                 self._logger.write(key, value, step=step)
 
-            # Save the model
-            self._manager.save(runner_state)
+            if step % (self._config["NUM_ENVS"] * self._config["NUM_STEPS"] * self._config["SAVE_INTERVAL"]) == 0:
+                # Save the model
+                self._manager.save(runner_state)
 
             # end = time.time()
 
