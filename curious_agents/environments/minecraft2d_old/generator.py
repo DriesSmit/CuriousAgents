@@ -72,9 +72,9 @@ class RandomGenerator(Generator):
         # Build the state.
         return State(
             agent_position=agent_position,
-            agent_level=jnp.array(0, jnp.int32),
+            agent_level=jnp.array(1, jnp.int32),
             map=map,
             action_mask=None,
             key=key,
-            level_step_count=jnp.array(0, jnp.int32),
+            step_count=jnp.array(0, jnp.int32),
         )

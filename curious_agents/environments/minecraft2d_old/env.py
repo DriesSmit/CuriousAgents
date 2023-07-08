@@ -22,7 +22,7 @@ from numpy.typing import NDArray
 
 from jumanji import specs
 from jumanji.env import Environment
-from curious_agents.environments.minecraft2d.constants import MOVES, ACTION_TO_LEVEL, BLOCK_TO_LEVEL, AIR, STEVE, DIAMOND_ORE, DIAMOND_PICKAXE_LEVEL
+from curious_agents.environments.minecraft2d.constants import MOVES, AIR, STEVE, DIAMOND_ORE
 from curious_agents.environments.minecraft2d.generator import Generator, RandomGenerator
 from curious_agents.environments.minecraft2d.types import Observation, Position, State
 from curious_agents.environments.minecraft2d.viewer import Minecraft2DEnvViewer
@@ -40,16 +40,15 @@ class Minecraft2D(Environment[State]):
     def __init__(
         self,
         generator: Optional[Generator] = None,
-        time_limit_per_task: Optional[int] = None,
+        time_limit: Optional[int] = None,
         viewer: Optional[Viewer[State]] = None,
     ) -> None:
        
-        self.generator = generator or RandomGenerator(num_rows=5, num_cols=5)
+        self.generator = generator or RandomGenerator(num_rows=10, num_cols=10)
         self.num_rows = self.generator.num_rows
         self.num_cols = self.generator.num_cols
         self.shape = (self.num_rows, self.num_cols)
-        self.time_limit_per_task = time_limit_per_task or self.num_rows + self.num_cols
-        self.max_level = DIAMOND_PICKAXE_LEVEL
+        self.time_limit = time_limit or 4 * (self.num_rows + self.num_cols)
 
         # Create viewer used for rendering
         self._viewer = viewer or Minecraft2DEnvViewer("Minecraft2D", render_mode="human")
@@ -60,7 +59,7 @@ class Minecraft2D(Environment[State]):
                 "Minecraft2D environment:",
                 f" - num_rows: {self.num_rows}",
                 f" - num_cols: {self.num_cols}",
-                f" - time_limit_per_task: {self.time_limit_per_task}",
+                f" - time_limit: {self.time_limit}",
                 f" - generator: {self.generator}",
             ]
         )
@@ -74,21 +73,21 @@ class Minecraft2D(Environment[State]):
             maximum=DIAMOND_ORE,
             name="map",
         )
-        level_step_count = specs.Array((), jnp.int32, "level_step_count")
+        step_count = specs.Array((), jnp.int32, "step_count")
         action_mask = specs.BoundedArray(
-            shape=(4+7,), dtype=bool, minimum=False, maximum=True, name="action_mask"
+            shape=(4,), dtype=bool, minimum=False, maximum=True, name="action_mask"
         )
         return specs.Spec(
             Observation,
             "ObservationSpec",
             map=map,
-            level_step_count=level_step_count,
+            step_count=step_count,
             action_mask=action_mask,
         )
 
     def action_spec(self) -> specs.DiscreteArray:
      
-        return specs.DiscreteArray(4+7, name="action")
+        return specs.DiscreteArray(4, name="action")
 
     def reset(self, key: chex.PRNGKey) -> Tuple[State, TimeStep[Observation]]:
         
@@ -110,13 +109,13 @@ class Minecraft2D(Environment[State]):
         self, state: State, action: chex.Array
     ) -> Tuple[State, TimeStep[Observation]]:
       
-        # If the chosen action is invalid, overwrite it to no-op.
-        move_action = jax.lax.select(state.action_mask[action] & (action < 4), action, 4)
+        # If the chosen action is invalid, i.e. blocked by a wall, overwrite it to no-op.
+        action = jax.lax.select(state.action_mask[action], action, 4)
 
         # Take the action in the environment:  up, right, down, or left
         # Remember the map coordinates: (0,0) is top left.
         agent_position = jax.lax.switch(
-            move_action,
+            action,
             [
                 lambda position: Position(position.row - 1, position.col),  # Up
                 lambda position: Position(position.row, position.col + 1),  # Right
@@ -128,31 +127,19 @@ class Minecraft2D(Environment[State]):
         )
 
         # Check if the agent has moved to a new level.
-        move_level_up = jnp.array(state.map[agent_position.row, agent_position.col] > STEVE, int)
-
-        # Update the map.
-        map = state.map.at[state.agent_position.row, state.agent_position.col].set(AIR)
-        map = map.at[agent_position.row, agent_position.col].set(STEVE)
-
-        # Builded something
-        build_level_up = state.action_mask[action] & (action > 3)
-        
-        level_up = move_level_up + build_level_up
+        level_up = jnp.array(state.map[agent_position.row, agent_position.col] > STEVE, int)
         agent_level = state.agent_level + level_up
 
         # Compute the reward.
         reward = level_up
 
-        
-
-        # Update the task step count.
-        # Reset the task step count if the agent has moved to a new level.
-        # Otherwise, increment the task step count.
-        level_step_count = (state.level_step_count + 1)*(1-level_up)
-
         # Generate action mask to keep in the state for the next step and
         # to provide to the agent in the observation.
         action_mask = self._compute_action_mask(state.map, agent_position, agent_level)
+
+        # Update the map.
+        map = state.map.at[state.agent_position.row, state.agent_position.col].set(AIR)
+        map = map.at[agent_position.row, agent_position.col].set(STEVE)
         
         # Build the state.
         state = State(
@@ -161,15 +148,16 @@ class Minecraft2D(Environment[State]):
             map=map,
             action_mask=action_mask,
             key=state.key,
-            level_step_count=level_step_count,
+            step_count=state.step_count + 1,
         )
         # Generate the observation from the environment state.
         observation = self._observation_from_state(state)
 
         # Check if the episode terminates (i.e. done is True).
-        at_max_level = state.agent_level == DIAMOND_PICKAXE_LEVEL
-        time_limit_exceeded = state.level_step_count >= self.time_limit_per_task
+        at_max_level = state.agent_level == DIAMOND_ORE
+        time_limit_exceeded = state.step_count >= self.time_limit
         no_actions_available = ~jnp.any(state.action_mask)
+
         done = at_max_level | time_limit_exceeded | no_actions_available
 
         # Return either a MID or a LAST timestep depending on done.
@@ -186,34 +174,26 @@ class Minecraft2D(Environment[State]):
         self, map: chex.Array, agent_position: Position, agent_level: chex.Array,
     ) -> chex.Array:
 
-        def is_action_valid(agent_position: Position, agent_level: chex.Array, action: chex.Array) -> chex.Array:
-            x, y = jnp.array([agent_position.row, agent_position.col]) + MOVES[action]
+        def is_move_valid(agent_position: Position, agent_level: chex.Array, move: chex.Array) -> chex.Array:
+            x, y = jnp.array([agent_position.row, agent_position.col]) + move
             mask = (
-                (
-                (action < 4)
-                & (x >= 0)
+                (x >= 0)
                 & (x < self.num_cols)
                 & (y >= 0)
                 & (y < self.num_rows)
-                & (BLOCK_TO_LEVEL[map[x, y]] <= agent_level+1)
-                )| 
-                (
-                (action > 3) 
-                & (ACTION_TO_LEVEL[action] == agent_level+1)
-                 )
+                & (map[x, y] <= agent_level+1)
             )
             return mask
 
-        # vmap over the actions.
-        action_mask = jax.vmap(is_action_valid, in_axes=(None, None, 0))(agent_position, agent_level, jnp.arange(4+7))
+        # vmap over the moves.
+        action_mask = jax.vmap(is_move_valid, in_axes=(None, None, 0))(agent_position, agent_level, MOVES)
         return action_mask
 
     def _observation_from_state(self, state: State) -> Observation:
         """Create an observation from the state of the environment."""
         return Observation(
             map=state.map,
-            level_step_count=state.level_step_count,
-            agent_level=state.agent_level,
+            step_count=state.step_count,
             action_mask=state.action_mask,
         )
 

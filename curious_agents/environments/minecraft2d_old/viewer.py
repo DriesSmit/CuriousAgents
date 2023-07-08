@@ -98,13 +98,13 @@ class Minecraft2DEnvViewer(Viewer):
         self._clear_display()
         fig, ax = self._get_fig_ax()
         ax.clear()
-        self._add_grid_image(state.map, state.agent_level, ax)
+        self._add_grid_image(state.map, ax)
         return self._display(fig)
 
     def animate(
         self,
         states: Sequence[chex.Array],
-        interval: 200,
+        interval: int = 200,
         save_path: Optional[str] = None,
     ) -> matplotlib.animation.FuncAnimation:
         """Create an animation from a sequence of states.
@@ -121,11 +121,10 @@ class Minecraft2DEnvViewer(Viewer):
         fig, ax = plt.subplots(num=f"{self._name}Animation", figsize=self.FIGURE_SIZE)
         plt.close(fig)
 
-        def make_frame(state_index: int) -> None:
+        def make_frame(map_index: int) -> None:
             ax.clear()
-            map = states[state_index].map
-            agent_level = states[state_index].agent_level
-            self._add_grid_image(map, agent_level, ax)
+            map = states[map_index].map
+            self._add_grid_image(map, ax)
 
         # Create the animation object.
         self._animation = matplotlib.animation.FuncAnimation(
@@ -155,11 +154,8 @@ class Minecraft2DEnvViewer(Viewer):
             ax = fig.get_axes()[0]
         return fig, ax
 
-    def _add_grid_image(self, map: chex.Array, agent_level: chex.Array, ax: Axes) -> image.AxesImage:
+    def _add_grid_image(self, map: chex.Array, ax: Axes) -> image.AxesImage:
         img = self._create_grid_image(map)
-
-        # Write the agent level on the image
-        ax.text(0, 0, f"Level: {agent_level}", fontsize=20, color='black', fontname=self.FONT_STYLE)
         ax.set_axis_off()
         return ax.imshow(img)
 
@@ -174,6 +170,7 @@ class Minecraft2DEnvViewer(Viewer):
             for j in range(width):
                 if map[i][j] != AIR:
                     img[i*res:(i+1)*res, j*res:(j+1)*res] = self._images[int(map[i][j])]
+
         return img
 
     def _display_human(self, fig: plt.Figure) -> None:

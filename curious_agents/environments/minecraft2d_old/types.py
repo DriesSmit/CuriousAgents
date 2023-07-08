@@ -40,7 +40,7 @@ class State:
     agent_level: current level of agent.
     map: array (bool) whose values are `True` where map are and `False` for empty cells.
     action_mask: array specifying which directions the agent can move in from its current position.
-    level_step_count: (int32) step number of the episode.
+    step_count: (int32) step number of the episode.
     key: random key used for auto-reset.
     """
 
@@ -48,7 +48,7 @@ class State:
     agent_level: jnp.int32  # ()
     map: chex.Array  # (num_rows, num_cols)
     action_mask: chex.Array  # (4,)
-    level_step_count: jnp.int32  # ()
+    step_count: jnp.int32  # ()
     key: chex.PRNGKey  # (2,)
 
 
@@ -57,11 +57,8 @@ class Observation(NamedTuple):
 
     map: array (bool) whose values are `True` where map are and `False` for empty cells.
     action_mask: array specifying which directions the agent can move in from its current position.
-    level_step_count: (int32) step number of the episode.
-    agent_level: current level of agent.
+    step_count: (int32) step number of the episode.
     """
     map: chex.Array  # (num_rows, num_cols)
     action_mask: chex.Array  # (4,)
-    level_step_count: jnp.int32  # ()
-    agent_level: jnp.int32  # ()
-
+    step_count: jnp.int32  # ()

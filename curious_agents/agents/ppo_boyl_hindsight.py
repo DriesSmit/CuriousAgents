@@ -20,7 +20,7 @@ from flax import struct
 
 # Turn the observation into an 3D array
 # Adapted from jumanji's process_observation function
-def process_observation(observation, time_limit):
+def process_observation(observation, time_limit, max_level):
     """Add the agent and the target to the walls array."""
     obs = observation.map.astype(int)
     n_classes = DIAMOND_ORE + 1  # assuming classes start at 0
@@ -29,10 +29,13 @@ def process_observation(observation, time_limit):
     one_hot_obs = jax.nn.one_hot(obs, n_classes)
 
     # Add step count layer
-    step_count = np.ones(obs.shape) * observation.step_count/time_limit
+    level_step_count = np.ones(obs.shape) * observation.level_step_count/time_limit
+
+    # Add agent_level layer
+    agent_level = np.ones(obs.shape) * observation.agent_level/max_level
 
     # Concatenate the one-hot encoded observations with the step count
-    obs = jnp.concatenate([one_hot_obs, step_count[..., None]], axis=-1)
+    obs = jnp.concatenate([one_hot_obs, level_step_count[..., None], agent_level[..., None]], axis=-1)
 
     return obs
 
@@ -408,7 +411,9 @@ class PPOAgent():
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
 
         env_state, timestep = jax.vmap(self._env.reset)(reset_rng)        
-        obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
+        obs = jax.vmap(process_observation, in_axes=(0, None, None))(timestep.observation,
+                                                                     self._env.time_limit_per_task,
+                                                                     self._env.max_level)
 
         # INIT RNG
         rng, encoder_rng, pol_rng, wm_rng, gen_rng, disc_rng = jax.random.split(rng, 6)
@@ -504,7 +509,9 @@ class PPOAgent():
         )(env_state, a_t)
 
         # Turn the observation into an 3D array
-        obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
+        obs = jax.vmap(process_observation, in_axes=(0, None, None))(timestep.observation,
+                                                                     self._env.time_limit_per_task,
+                                                                     self._env.max_level)
         
         done = timestep.last()
         original_reward = timestep.reward
