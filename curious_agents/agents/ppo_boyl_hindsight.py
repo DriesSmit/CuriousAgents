@@ -3,7 +3,6 @@
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-import numpy as np
 import optax
 from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple
@@ -29,10 +28,10 @@ def process_observation(observation, time_limit, max_level):
     one_hot_obs = jax.nn.one_hot(obs, n_classes)
 
     # Add step count layer
-    level_step_count = np.ones(obs.shape) * observation.level_step_count/time_limit
+    level_step_count = jnp.ones(obs.shape) * observation.level_step_count/time_limit
 
     # Add agent_level layer
-    agent_level = np.ones(obs.shape) * observation.agent_level/max_level
+    agent_level = jnp.ones(obs.shape) * observation.agent_level/max_level
 
     # Concatenate the one-hot encoded observations with the step count
     obs = jnp.concatenate([one_hot_obs, level_step_count[..., None], agent_level[..., None]], axis=-1)
@@ -122,7 +121,7 @@ class ObservationEncoder(nn.Module):
                 kernel_size=(3, 3),
                 strides=(1, 1),
                 padding="SAME",  # added padding
-                kernel_init=orthogonal(np.sqrt(2)),
+                kernel_init=orthogonal(jnp.sqrt(2)),
                 bias_init=constant(0.0),
             )(layer_out)
             layer_out = activation(layer_out)
@@ -132,7 +131,7 @@ class ObservationEncoder(nn.Module):
         for _ in range(2):
             layer_out = nn.Dense(
                 128,  # increased the number of features
-                kernel_init=orthogonal(np.sqrt(2)),
+                kernel_init=orthogonal(jnp.sqrt(2)),
                 bias_init=constant(0.0),
             )(layer_out)
             layer_out = activation(layer_out)
@@ -163,7 +162,7 @@ class ActorCritic(nn.Module):
             activation = nn.tanh
 
         actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(x_tm1)
         actor_mean = activation(actor_mean)
 
@@ -176,7 +175,7 @@ class ActorCritic(nn.Module):
         critic_obs_encoder = ObservationEncoder(self.x_size,  self.activation)
         critic = critic_obs_encoder(o_tm1)
         critic = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(critic)
         critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
@@ -202,11 +201,11 @@ class WorldModel(nn.Module):
         inp = jnp.concatenate([z_t, x_tm1, one_hot_action], axis=-1)
 
         layer_out = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(inp)
         layer_out = activation(layer_out)
         layer_out = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(layer_out)
         layer_out = activation(layer_out)
         layer_out = nn.Dense(x_tm1.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
@@ -232,11 +231,11 @@ class Generator(nn.Module):
         inp = jnp.concatenate([x_tm1, x_t, one_hot_action], axis=-1)
 
         layer_out = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(inp)
         layer_out = activation(layer_out)
         layer_out = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(layer_out)
         layer_out = activation(layer_out)
         layer_out = nn.Dense(self.z_dim, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
@@ -266,11 +265,11 @@ class Discriminator(nn.Module):
         inp = jnp.concatenate([z_t, x_tm1, one_hot_action], axis=-1)
 
         layer_out = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(inp)
         layer_out = activation(layer_out)
         layer_out = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
         )(layer_out)
         layer_out = activation(layer_out)
         layer_out = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
