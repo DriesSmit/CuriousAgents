@@ -53,34 +53,21 @@ class RandomGenerator(Generator):
 
         # Generate the map. Place one WOODEN_LOG, COBBLESTONE, IRON_ORE and DIAMOND_ORE on the map.
         map = jnp.ones((self.num_rows, self.num_cols), dtype=jnp.int32) * AIR
-        # TODO: Speed this up by selectin 4 values at once and setting them at the same time.
-        for i in [WOODEN_LOG, COBBLESTONE, IRON_ORE, DIAMOND_ORE]:
-            key, map_key = jax.random.split(key)
-            rand_index = jax.random.choice(
-                            map_key,
+        things = jnp.array([STEVE, WOODEN_LOG, COBBLESTONE, IRON_ORE, DIAMOND_ORE])
+
+        indices = jax.random.choice(
+                            key,
                             jnp.arange(self.num_rows * self.num_cols),
+                            shape=(len(things),),
                             replace=False,
-                            p=map.flatten()==AIR,
                         )
-            (rand_x, rand_y) = jnp.divmod(
-                                    rand_index, self.num_cols
-                                )
-
-            map = map.at[rand_x, rand_y].set(i)
-
-        # Randomise agent start and target positions.
-        key, agent_key = jax.random.split(key)
-        start_index = jax.random.choice(
-            agent_key,
-            jnp.arange(self.num_rows * self.num_cols),
-            replace=False,
-            p=map.flatten()==AIR,
-        )
-        (agent_row, agent_col) = jnp.divmod(
-            start_index, self.num_cols
-        )
-        agent_position = Position(row=agent_row, col=agent_col)
-        map = map.at[agent_row, agent_col].set(STEVE)
+        
+        (rand_x, rand_y) = jnp.divmod(
+                                indices, self.num_cols
+                            )
+        
+        map = map.at[rand_x, rand_y].set(things)
+        agent_position = Position(row=rand_x[0], col=rand_y[0])
 
         # Build the state.
         return State(
