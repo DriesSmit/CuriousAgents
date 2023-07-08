@@ -342,8 +342,8 @@ class PPOAgent():
         "NUM_MINIBATCHES": 4,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 0.95,
-        "CLIP_EPS": 0.15,
-        "ENT_COEF": 0.02,
+        "CLIP_EPS": 0.2,
+        "ENT_COEF": 0.01,
         "VF_COEF": 0.5,
         "DISC_IMP_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
@@ -410,11 +410,11 @@ class PPOAgent():
         obs = jax.vmap(process_observation, in_axes=(0, None))(timestep.observation, self._env.time_limit)
 
         # INIT RNG
-        rng, online_rng, target_rng, pol_rng, wm_rng, gen_rng, disc_rng = jax.random.split(rng, 7)
+        rng, encoder_rng, pol_rng, wm_rng, gen_rng, disc_rng = jax.random.split(rng, 6)
 
         # INIT THE ENCODERS
-        online_params = self._online_encoder.init(online_rng, obs)
-        target_params = self._target_encoder.init(target_rng, obs)
+        online_params = self._online_encoder.init(encoder_rng, obs)
+        target_params = self._target_encoder.init(encoder_rng, obs)
 
         # Init latent
         x_zero = jnp.zeros(self._config["X_LATENT_SIZE"], dtype=jnp.float32)
@@ -509,24 +509,28 @@ class PPOAgent():
         original_reward = timestep.reward
 
         # Calcuate the distance between the predicted and the actual observation
-        x_t = self._target_encoder.apply(train_states.target, obs)
-        z_t = self._generator.apply(train_states.generator.params, x_tm1, a_t, x_t) 
-        pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_t, z_t)
+        # x_t = self._target_encoder.apply(train_states.target, obs)
+        # z_t = self._generator.apply(train_states.generator.params, x_tm1, a_t, x_t) 
+        # pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_t, z_t)
 
         # Set the reward to be the distance between the predicted and the actual observation
         # TODO: Clip this reward to be within one standard deviation of the mean. This 
         # should help with training stablity.
-        reward = boyl_loss(pred_x_t, x_t)
 
-        env_state, info = self._env._update_reward_info(env_state, 
-                                                        reward=original_reward, 
-                                                        wm_reward=reward, 
-                                                        done=done)
+        # TODO: Change this back.
+        reward = original_reward #boyl_loss(pred_x_t, x_t)
+
+        
 
         # TODO: Try adding this back in for training stablity.
         # alpha = self._config["REWARD_UPDATE_RATE"]
         # reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
         # reward = reward/reward_std
+
+        env_state, info = self._env._update_reward_info(env_state, 
+                                                        reward=original_reward, 
+                                                        wm_reward=reward, 
+                                                        done=done)
 
         transition = Transition(
             done, a_t, value, reward, log_prob, last_obs, obs, info
@@ -695,48 +699,60 @@ class PPOAgent():
                 new_policy_state = train_states.policy.apply_gradients(grads=policy_grads)  
 
                 # UPDATE THE ONLINE AND WORLD MODEL NETWORKS
-                grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
-                wm_loss, (online_grads_w, wm_grads) = grad_fn(
-                    train_states.online.params, train_states.world_model.params,
-                    traj_batch,
-                )
+                # TODO: Add this back in
+                # grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
+                # wm_loss, (online_grads_w, wm_grads) = grad_fn(
+                #     train_states.online.params, train_states.world_model.params,
+                #     traj_batch,
+                # )
+                # new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
+
+                wm_loss = 0
                 losses += (wm_loss,)
                 # Is there a way to do this in one go?
                 # TODO: Delete the commented out code below.
                 # online_grads = jax.tree_util.tree_map(lambda x, y: (x + y) / 2, online_grads_p, online_grads_w)
-                # new_online_state = train_states.online.apply_gradients(grads=online_grads_p)
-                new_online_state = train_states.online.apply_gradients(grads=online_grads_w)
+                new_online_state = train_states.online.apply_gradients(grads=online_grads_p)
+                # new_online_state = train_states.online.apply_gradients(grads=online_grads_w)
 
-                new_wm_state = train_states.world_model.apply_gradients(grads=wm_grads)
+                
 
                 # UPDATE THE GENERATOR
-                grad_fn = jax.value_and_grad(_generator_loss_fn)
-                gen_loss, gen_grads = grad_fn(
-                    train_states.generator.params,
-                    traj_batch,
-                )
+                # TODO: Add this back in
+                # grad_fn = jax.value_and_grad(_generator_loss_fn)
+                # gen_loss, gen_grads = grad_fn(
+                #     train_states.generator.params,
+                #     traj_batch,
+                # )
+                # new_gen_state = train_states.generator.apply_gradients(grads=gen_grads)
+                gen_loss = 0
                 losses += (gen_loss,)
-                new_gen_state = train_states.generator.apply_gradients(grads=gen_grads)
+                
 
                 # UPDATE THE DISCRIMINATOR
-                grad_fn = jax.value_and_grad(_discriminator_loss_fn)
-                disc_loss, disc_grads = grad_fn(
-                    train_states.discriminator.params,
-                    traj_batch,
-                )
+                # TODO: Add this back in
+                # grad_fn = jax.value_and_grad(_discriminator_loss_fn)
+                # disc_loss, disc_grads = grad_fn(
+                #     train_states.discriminator.params,
+                #     traj_batch,
+                # )
+                # new_disc_state = train_states.discriminator.apply_gradients(grads=disc_grads)
+
+                disc_loss = 0
                 losses += (disc_loss,)
-                new_disc_state = train_states.discriminator.apply_gradients(grads=disc_grads)
+                
 
                 # UPDATE THE TARGET MODEL USING MOVING AVERAGES
-                alpha = self._config["TARGET_UPDATE_RATE"]
-                new_target_state = jax.tree_util.tree_map(
-                    lambda target, online: (
-                        1 - alpha
-                    ) * target
-                    + alpha * online,
-                    train_states.target,
-                    train_states.online.params,
-                )
+                # TODO: Add this back in
+                # alpha = self._config["TARGET_UPDATE_RATE"]
+                # new_target_state = jax.tree_util.tree_map(
+                #     lambda target, online: (
+                #         1 - alpha
+                #     ) * target
+                #     + alpha * online,
+                #     train_states.target,
+                #     train_states.online.params,
+                # )
                 # Calculate the distance metrix between the online and target model
                 # STEP 1: Flatten both models
                 online_params_flat = flatten_params(train_states.online.params)
@@ -746,6 +762,13 @@ class PPOAgent():
                 distance = compute_distance(
                     online_params_flat, target_params_flat,
                 )
+
+                # TODO: Delete the code below
+                new_target_state = train_states.target
+                new_wm_state = train_states.world_model
+                new_gen_state = train_states.generator
+                new_disc_state = train_states.discriminator
+
                 
                 train_states = BOYLTrainState(
                     policy=new_policy_state,
