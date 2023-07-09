@@ -3,7 +3,7 @@ import subprocess
 import os
 import shutil
 results_dir = "./results"
-keyword = "exp: "
+keyword = ": "
 
 def get_current_git_commit():
     try:
@@ -44,8 +44,8 @@ user_msg = input("Enter a message for the user: ")
 # Get the current git commit and commit message
 commit, commit_message = get_current_git_commit()
 
-assert commit_message.startswith(keyword), f"Commit message must start with {keyword}"
-exp_msg = commit_message[len(keyword):]
+assert keyword in commit_message, f"Commit message must contain with {keyword}"
+msg = commit_message.split(keyword, 1)[-1]
 
 # Get the current date in format YYYY_MM_DD
 date = datetime.datetime.now().strftime("%Y_%m_%d")
@@ -59,7 +59,7 @@ dst_logs = copy_logs(".", f"{results_dir}/{date}")
 with open(f"{dst_logs}/notes.txt", "w") as f:
     if user_msg:
         f.write(f"User message: {user_msg}\n")
-    f.write(f"Commit message: {exp_msg}\n")
+    f.write(f"Commit message: {msg}\n")
     f.write(f"Commit: {commit}\n")
     
     

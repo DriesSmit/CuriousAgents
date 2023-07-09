@@ -521,16 +521,13 @@ class PPOAgent():
         pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_t, z_t)
 
         # Set the reward to be the distance between the predicted and the actual observation
-        # TODO: Clip this reward to be within one standard deviation of the mean. This 
-        # should help with training stablity.
         reward = boyl_loss(pred_x_t, x_t)
 
-        
-
-        # TODO: Try adding this back in for training stablity.
-        # alpha = self._config["REWARD_UPDATE_RATE"]
-        # reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
-        # reward = reward/reward_std
+        # Clip the reward to be within one standard deviation of the mean
+        # to help with training stability.
+        alpha = self._config["REWARD_UPDATE_RATE"]
+        reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
+        reward = jnp.clip(reward/reward_std, 0, 1)
 
         env_state, info = self._env._update_reward_info(env_state, 
                                                         reward=original_reward, 
@@ -713,8 +710,10 @@ class PPOAgent():
                 losses += (wm_loss,)
                 # Is there a way to do this in one go?
                 # TODO: Delete the commented out code below.
-                # online_grads = jax.tree_util.tree_map(lambda x, y: (x + y) / 2, online_grads_p, online_grads_w)
-                new_online_state = train_states.online.apply_gradients(grads=online_grads_p)
+                online_grads = jax.tree_util.tree_map(lambda x, y: (x + y) / 2, online_grads_p, online_grads_w)
+                new_online_state = train_states.online.apply_gradients(grads=online_grads)
+
+                # new_online_state = train_states.online.apply_gradients(grads=online_grads_p)
                 # new_online_state = train_states.online.apply_gradients(grads=online_grads_w)
 
                 
