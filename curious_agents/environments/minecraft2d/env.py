@@ -48,6 +48,8 @@ class Minecraft2D(Environment[State]):
         self.num_rows = self.generator.num_rows
         self.num_cols = self.generator.num_cols
         self.shape = (self.num_rows, self.num_cols)
+
+        # TODO: Fix this.
         self.time_limit_per_task = time_limit_per_task or self.num_rows + self.num_cols
         self.max_level = DIAMOND_PICKAXE_LEVEL
 

@@ -56,9 +56,27 @@ class Minecraft2DEnvViewer(Viewer):
         
         self._resolution = resolution
 
+        # Equipent labels
+        self._equipment_labels = [None, None, 'wooden_plank', 'stick', 'wooden_pickaxe', 'wooden_pickaxe', 
+                                    'stone_pickaxe', 'stone_pickaxe', 'iron_ingot', 'iron_pickaxe', 'diamond',
+                                    'diamond_pickaxe']
+
         # Load the images with the correct resolution
-        img_path = "curious_agents/environments/minecraft2d/images/"
+        img_path = "curious_agents/environments/minecraft2d/images"
         self._images = self._load_and_resize_images(img_path, resolution)
+
+    def _load_and_resize_image(self, img_path, label, resolution):
+        # Load image with matplotlib's image.imread()
+        img_np = image.imread(f"{img_path}/{label}.png")
+
+        # Calculate the resize factor
+        resize_factor = np.array((resolution / img_np.shape[0], resolution / img_np.shape[1]))
+
+        # Resize the image
+        resized_img_np = zoom(img_np, (resize_factor[0], resize_factor[1], 1))
+
+        # Clip values to be within the valid range
+        return np.clip(resized_img_np, 0, 1)
 
     def _load_and_resize_images(self, img_path, resolution):
         img_indices = [STEVE, WOODEN_LOG, COBBLESTONE, IRON_ORE, DIAMOND_ORE]
@@ -67,20 +85,14 @@ class Minecraft2DEnvViewer(Viewer):
         # Load and resize images
         images = {}
         for index, label in zip(img_indices, img_labels):
-            # Load image with matplotlib's image.imread()
-            img_np = image.imread(f"{img_path}/{label}.png")
-
-            # Calculate the resize factor
-            resize_factor = np.array((resolution / img_np.shape[0], resolution / img_np.shape[1]))
-
-            # Resize the image
-            resized_img_np = zoom(img_np, (resize_factor[0], resize_factor[1], 1))
-
-            # Clip values to be within the valid range
-            resized_img_np = np.clip(resized_img_np, 0, 1)
-
             # Add the resized image to the dictionary
-            images[index] = resized_img_np
+            images[index] = self._load_and_resize_image(img_path, label, resolution)
+
+        # Load and resize images
+        for label in set(self._equipment_labels):
+            if label is not None:
+                # Add the resized image to the dictionary
+                images[label] = self._load_and_resize_image(img_path, label, resolution)   
 
         return images
 
@@ -98,7 +110,11 @@ class Minecraft2DEnvViewer(Viewer):
         self._clear_display()
         fig, ax = self._get_fig_ax()
         ax.clear()
-        self._add_grid_image(state.map, state.agent_level, ax)
+
+        # TODO: Make this generic
+        agent_position = [(state.agent_position.col - 0.1) / 5, 1.0 - (state.agent_position.row+1.1) / 5]
+
+        self._add_grid_image(state.map, state.agent_level, agent_position, ax)
         return self._display(fig)
 
     def animate(
@@ -123,9 +139,14 @@ class Minecraft2DEnvViewer(Viewer):
 
         def make_frame(state_index: int) -> None:
             ax.clear()
-            map = states[state_index].map
-            agent_level = states[state_index].agent_level
-            self._add_grid_image(map, agent_level, ax)
+            state = states[state_index]
+            map = state.map
+            agent_level = state.agent_level
+
+            # TODO: Make this generic
+            agent_position = [(state.agent_position.col - 0.1) / 5, 1.0 - (state.agent_position.row+1.1) / 5]
+
+            self._add_grid_image(map, agent_level, agent_position, ax)
 
         # Create the animation object.
         self._animation = matplotlib.animation.FuncAnimation(
@@ -155,13 +176,27 @@ class Minecraft2DEnvViewer(Viewer):
             ax = fig.get_axes()[0]
         return fig, ax
 
-    def _add_grid_image(self, map: chex.Array, agent_level: chex.Array, ax: Axes) -> image.AxesImage:
+    def _add_grid_image(self, map: chex.Array, agent_level: chex.Array, agent_pos: chex.Array, ax: Axes) -> image.AxesImage:
         img = self._create_grid_image(map)
 
         # Write the agent level on the image
-        ax.text(0, 0, f"Level: {agent_level}", fontsize=20, color='black', fontname=self.FONT_STYLE)
+        ax.text(0, 0, f"Episode return: {agent_level}", fontsize=20, color='black', fontname=self.FONT_STYLE)
         ax.set_axis_off()
+
+        # Draw a image on the top left corner of the image
+        level_label = self._equipment_labels[agent_level]
+        if level_label is not None:
+
+
+            # Create new Axes at specific location
+            inset_ax = ax.inset_axes([agent_pos[0], agent_pos[1], 0.1, 0.1])
+
+            # Draw the image on the new Axes
+            inset_ax.imshow(self._images[level_label])
+            inset_ax.axis('off')  # Hide the axes for this inset plot
+
         return ax.imshow(img)
+
 
     def _create_grid_image(self, map: chex.Array) -> NDArray:
         length = len(map)

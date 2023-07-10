@@ -3,10 +3,10 @@ defaults:
 
 name: CuriousAgents
 env_name: Minecraft2D # Maze-v0 # MountainCar-v0 # 
-train: True
-load_state: False
+train: False
+load_state: True
 visualise: True
 visualisation_steps: 200
 log_dir: "./logs"
 training_steps: 1e9 # 2e7 # 
-seed: 54321
+seed: 54321012
