@@ -180,7 +180,7 @@ class Minecraft2DEnvViewer(Viewer):
         img = self._create_grid_image(map)
 
         # Write the agent level on the image
-        ax.text(0, 0, f"Episode return: {agent_level}", fontsize=20, color='black', fontname=self.FONT_STYLE)
+        ax.text(0, -1, f"Episode return: {agent_level}", fontsize=20, color='black', fontname=self.FONT_STYLE)
         ax.set_axis_off()
 
         # Draw a image on the top left corner of the image
