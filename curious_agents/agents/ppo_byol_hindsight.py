@@ -297,7 +297,7 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-class BOYLTrainState(NamedTuple):
+class BYOLTrainState(NamedTuple):
         policy: jnp.array
         online: jnp.array
         target: jnp.array
@@ -323,7 +323,7 @@ def normalise(arr):
     norm = jnp.sqrt(jnp.sum(jnp.square(arr), axis=-1))[..., None]
     return arr/norm
 
-def boyl_loss(pred_x_t, x_t):
+def byol_loss(pred_x_t, x_t):
     # CALCULATE WORLD MODEL LOSS
     # TODO: Try to add this back and romove the tanh on the 
     # encoder output side.
@@ -476,7 +476,7 @@ class PPOAgent():
             tx=wm_tx,
         )
 
-        train_states = BOYLTrainState(
+        train_states = BYOLTrainState(
             policy=policy_train_state,
             online=online_train_state,
             target=target_params,
@@ -521,7 +521,7 @@ class PPOAgent():
         pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_t, z_t)
 
         # Set the reward to be the distance between the predicted and the actual observation
-        reward = boyl_loss(pred_x_t, x_t)
+        reward = byol_loss(pred_x_t, x_t)
 
         # Clip the reward to be within one standard deviation of the mean
         # to help with training stability.
@@ -642,7 +642,7 @@ class PPOAgent():
                     # rely as much as possible on x_tm1 and a_tm1, and as little as possible
                     # on z_t.
                     pred_x_t = self._world_model.apply(world_model_params, x_tm1, a_tm1, z_t)
-                    return boyl_loss(pred_x_t, x_t).mean()
+                    return byol_loss(pred_x_t, x_t).mean()
                 
                 def calc_disc_loss(params, x_tm1, a_tm1, z_t):
                     # Entry fuction
@@ -675,7 +675,7 @@ class PPOAgent():
 
                     # CALCULATE THE WORLD MODEL LOSS
                     pred_x_t = self._world_model.apply(train_states.world_model.params, x_tm1, a_tm1, z_t)
-                    wm_loss = boyl_loss(pred_x_t, x_t).mean()
+                    wm_loss = byol_loss(pred_x_t, x_t).mean()
 
                     disc_loss = calc_disc_loss(train_states.discriminator.params, x_tm1, a_tm1, z_t)
 
@@ -759,7 +759,7 @@ class PPOAgent():
                     online_params_flat, target_params_flat,
                 )
                 
-                train_states = BOYLTrainState(
+                train_states = BYOLTrainState(
                     policy=new_policy_state,
                     online=new_online_state,
                     target=new_target_state,
