@@ -859,23 +859,16 @@ class PPOAgent():
         
         jitted_step_fn = jax.jit(self._env_step)
 
-        not_good = True
-        # TODO: This is a hacky way to get a good run. Remove this.
-        while not_good:
-            env_state_seq = []
+        env_state_seq = []
 
-            # Do a force restart
-            reset_rng = jax.random.split(runner_state[-2], self._config["NUM_ENVS"])
-            env_state, _ = jax.vmap(self._env.reset)(reset_rng)   
-            runner_state = (runner_state[0], env_state, runner_state[2], runner_state[3], runner_state[4], runner_state[5])
+        # Do a force restart
+        reset_rng = jax.random.split(runner_state[-2], self._config["NUM_ENVS"])
+        env_state, _ = jax.vmap(self._env.reset)(reset_rng)   
+        runner_state = (runner_state[0], env_state, runner_state[2], runner_state[3], runner_state[4], runner_state[5])
 
-            for _ in range(num_steps):
-                runner_state, (transition, _) = jitted_step_fn(runner_state, None)
-                
-                if jnp.max(transition.info["episode_returns"]) == 11:
-                    not_good = False
-
-                env_state_seq.append(runner_state[1].env_state)
+        for _ in range(num_steps):
+            runner_state, _ = jitted_step_fn(runner_state, None)
+            env_state_seq.append(runner_state[1].env_state)
 
         # Take first run for each array using JAX treemap
         env_state_seq = jax.tree_map(lambda x: x[0], env_state_seq)
