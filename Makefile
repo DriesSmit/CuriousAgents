@@ -15,3 +15,8 @@ tensorboard:
 
 sudo_clean:
 	sudo rm -r ./logs
+kill_running:
+	nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -n1 kill -9
+save_result:
+	python save_result.py
+

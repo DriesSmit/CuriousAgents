@@ -375,7 +375,7 @@ class PPOAgent():
         runner_state = (policy_train_state, wm_train_state, env_state, last_obs, rng)
         return runner_state, metric["returned_episode_returns"]
 
-    def run_and_save_gif(self, runner_state, num_steps=1000, num_vis_steps = 1000, output_loc="./logs/MountainCar.gif"):
+    def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/MountainCar.gif"):
         # RUN ENV
         _, (_, env_states) = jax.lax.scan(
             self._env_step, runner_state, None, num_steps
@@ -390,7 +390,7 @@ class PPOAgent():
         dict_env_arr = asdict(env_state_arr)
         fields = env_state.__annotations__.keys()
         
-        for i in range(num_steps - num_vis_steps, num_steps):
+        for i in range(0, num_steps):
             entry_dict = {}
             # Calculate the first episode's information
             for key in fields:
