@@ -1,7 +1,7 @@
 from curious_agents.agents.ppo_ff import PPOAgent as FFPPOAgent
 from curious_agents.agents.ppo_ff_world_model import PPOAgent as WorldModelPPOAgent
-from curious_agents.agents.ppo_boyl_explore import PPOAgent as BOYLPPOAgent
-from curious_agents.agents.ppo_boyl_hindsight import PPOAgent as BOYLHindsightPPOAgent
+from curious_agents.agents.ppo_byol_explore import PPOAgent as BYOLPPOAgent
+from curious_agents.agents.ppo_byol_hindsight import PPOAgent as BYOLHindsightPPOAgent
 from omegaconf import DictConfig
 
 def create_agent(cfg: DictConfig):
@@ -9,10 +9,10 @@ def create_agent(cfg: DictConfig):
         return FFPPOAgent(cfg.env_name)
     elif cfg.agent.name == "ppo_ff_world_model":
         return WorldModelPPOAgent(cfg.env_name)
-    elif cfg.agent.name == "ppo_boyl_explore":
-        return BOYLPPOAgent(cfg.env_name)
-    elif cfg.agent.name == "ppo_boyl_hindsight":
-        return BOYLHindsightPPOAgent(cfg.env_name)
+    elif cfg.agent.name == "ppo_byol_explore":
+        return BYOLPPOAgent(cfg.env_name)
+    elif cfg.agent.name == "ppo_byol_hindsight":
+        return BYOLHindsightPPOAgent(cfg.env_name)
     
 
     

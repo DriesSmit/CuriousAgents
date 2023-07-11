@@ -1,12 +1,12 @@
 defaults:
-  - agent: ppo_boyl_hindsight # ppo_boyl_explore #  ppo_ff_world_model #
+  - agent: ppo_byol_hindsight # ppo_byol_explore #  ppo_ff_world_model #
 
 name: CuriousAgents
 env_name: Minecraft2D # Maze-v0 # MountainCar-v0 # 
-train: False
+train: True
 load_state: False
 visualise: True
 visualisation_steps: 200
 log_dir: "./logs"
-training_steps: 1e9 # 2e7 # 
-seed: 54321012
+training_steps: 1e9
+seed: 1234

@@ -162,7 +162,7 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-class BOYLTrainState(NamedTuple):
+class BYOLTrainState(NamedTuple):
         policy: jnp.array
         online: jnp.array
         target: jnp.array
@@ -186,7 +186,7 @@ def normalise(arr):
     norm = jnp.sqrt(jnp.sum(jnp.square(arr), axis=-1))[..., None]
     return arr/norm
 
-def boyl_loss(pred_l_t, l_t):
+def byol_loss(pred_l_t, l_t):
     # CALCULATE WORLD MODEL LOSS
     norm_pred_l_t = pred_l_t # normalise(pred_l_t)
     norm_l_t = l_t # normalise(l_t)
@@ -315,7 +315,7 @@ class PPOAgent():
             tx=wm_tx,
         )
 
-        train_states = BOYLTrainState(
+        train_states = BYOLTrainState(
             policy=policy_train_state,
             online=online_train_state,
             target=target_params,
@@ -355,7 +355,7 @@ class PPOAgent():
 
         # Set the reward to be the distance between the predicted and the actual observation
 
-        reward = boyl_loss(pred_l_t, l_t)
+        reward = byol_loss(pred_l_t, l_t)
         alpha = self._config["REWARD_UPDATE_RATE"]
         # TODO: This is not really the std
         reward_std = reward_std*(1-alpha) + alpha*jnp.std(reward)
@@ -464,7 +464,7 @@ class PPOAgent():
                     l_tm1 = self._online_encoder.apply(online_params, traj_batch.obs)
                     pred_l_t = self._world_model.apply(world_model_params, l_tm1, traj_batch.action)
                     l_t = jax.lax.stop_gradient(self._target_encoder.apply(train_states.target, traj_batch.next_obs))
-                    return boyl_loss(pred_l_t, l_t).mean()
+                    return byol_loss(pred_l_t, l_t).mean()
                 grad_fn = jax.value_and_grad(_wm_loss_fn, argnums=[0, 1])
                 wm_loss, (online_grads, wm_grads), = grad_fn(
                     train_states.online.params, train_states.world_model.params, traj_batch,
@@ -493,7 +493,7 @@ class PPOAgent():
                     online_params_flat, target_params_flat,
                 )
                 
-                train_states = BOYLTrainState(
+                train_states = BYOLTrainState(
                     policy=new_policy_state,
                     online=new_online_state,
                     world_model=new_wm_state,
