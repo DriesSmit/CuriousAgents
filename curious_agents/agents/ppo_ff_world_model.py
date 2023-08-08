@@ -376,7 +376,6 @@ class PPOAgent():
 
     def run_and_save_gif(self, runner_state, num_steps=1000, output_loc="./logs/MountainCar.gif"):
         # RUN ENV
-        print("runner state: ", len(runner_state))
         _, (_, env_states) = jax.lax.scan(
             self._env_step, runner_state, None, num_steps
         )
