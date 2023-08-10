@@ -135,14 +135,6 @@ class PPOAgent():
         self._logger = None
 
     def init_state(self, rng):
-        def linear_schedule(count):
-            frac = (
-                1.0
-                - (count // (self._config["NUM_MINIBATCHES"] * self._config["UPDATE_EPOCHS"]))
-                / self._config["NUM_UPDATES"]
-            )
-            return self._config["LR"] * frac
-        
         rng, policy_rng, wm_rng = jax.random.split(rng, 3)
         zero_obs = jnp.zeros(self._env.observation_space(self._env_params).shape)
         policy_params = self._policy_network.init(policy_rng, zero_obs)
@@ -195,7 +187,14 @@ class PPOAgent():
 
             # Calcuate the distance between the predicted and the actual observation
             pred_o_t = self._world_model.apply(wm_train_state.params, o_tm1, action)
-            reward = l2_norm_squared(o_t - pred_o_t)
+
+            # Note: Here we user the abs distance between the predicted and the actual observation
+            # instead of the l2 norm squared. This is because the l2 norm squared reduces the
+            # reward to much for effective learning.
+            reward = jnp.sum(jnp.abs(o_t - pred_o_t), axis=-1) #  l2_norm_squared(o_t - pred_o_t)
+
+            # Hardcoded reward to test normal learning
+            # reward = jnp.abs(o_t[:, 1]) + 0.1*original_reward
 
             transition = Transition(
                 done, action, value, reward, log_prob, o_tm1, o_t, info
@@ -419,4 +418,4 @@ class PPOAgent():
             update_fn, runner_state, None, length=num_updates
         )
         runner_state, epi_returns = jax.jit(scan_fn)(runner_state)
-        return runner_state, epi_returns
+        return runner_state
