@@ -18,6 +18,8 @@ from curious_agents.environments.wrappers import FlattenObservationWrapper, LogW
 
 
 class ScannedRNN(nn.Module):
+    """RNN Architecture"""
+    # nn.scan function processes sequences of data
     @functools.partial(
         nn.scan,
         variable_broadcast="params",
@@ -27,9 +29,22 @@ class ScannedRNN(nn.Module):
     )
     @nn.compact
     def __call__(self, carry, x):
-        """Applies the module."""
+        """
+        Applies the module (GRU cell).
+
+        Args:
+            carry: RNN hidden state
+            x: Input sequences to be split into inputs and reset signals
+
+        Returns:
+            _description_
+        """
+        # Initialise RNN state to hidden state, obtain inputs and reset signals
         rnn_state = carry
         ins, resets = x
+        
+        # TODO: INVESTIGATE RESETS
+        # Where resets are (?), execute initialize_carry fn, else keep rnn_state
         rnn_state = jnp.where(
             resets[:, np.newaxis],
             self.initialize_carry(ins.shape[0], ins.shape[1]),
@@ -40,6 +55,16 @@ class ScannedRNN(nn.Module):
 
     @staticmethod
     def initialize_carry(batch_size, hidden_size):
+        """
+        Initialise GRU hidden state
+
+        Args:
+            batch_size: TODO
+            hidden_size: TODO
+
+        Returns:
+            TODO
+        """
         # Use a dummy key since the default state init fn is just zeros.
         return nn.GRUCell.initialize_carry(
             jax.random.PRNGKey(0), (batch_size,), hidden_size
@@ -52,15 +77,31 @@ class ActorCriticRNN(nn.Module):
 
     @nn.compact
     def __call__(self, hidden, x):
+        """
+        Generate policy over actions and compute value of current state.
+        Incorporates RNN to maintain memory of past interactions
+
+        Args:
+            hidden: Hidden state of RNN
+            x: Input - observations and done signals
+
+        Returns:
+            TODO
+        """
+        # Extract observations and done signals from input
         obs, dones = x
+        
+        # Create embedding from observations
         embedding = nn.Dense(
             128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(obs)
         embedding = nn.relu(embedding)
 
+        # Embedding is passed into RNN, hidden state and embedding is updated
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
 
+        # Actor - Dense layers applied to updated embedding
         actor_mean = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
             embedding
         )
@@ -69,8 +110,10 @@ class ActorCriticRNN(nn.Module):
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
 
+        # Actor - categorical distribution represents policy
         pi = distrax.Categorical(logits=actor_mean)
 
+        # Critic - Dense layers applied to updated embedding
         critic = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
             embedding
         )
@@ -79,10 +122,12 @@ class ActorCriticRNN(nn.Module):
             critic
         )
 
+        # Return updated hidden state, policy and state value
         return hidden, pi, jnp.squeeze(critic, axis=-1)
 
 
 class Transition(NamedTuple):
+    """Contains information for an environment transition"""
     done: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray
@@ -112,15 +157,19 @@ class PPOAgent():
         self._config["MINIBATCH_SIZE"] = (
             self._config["NUM_ENVS"] * self._config["NUM_STEPS"] // self._config["NUM_MINIBATCHES"]
         )
+        
+        # Create environment
         self._env, self._env_params = gymnax.make(self._config["ENV_NAME"])
         self._env = FlattenObservationWrapper(self._env)
         self._env = LogWrapper(self._env)
 
         # INIT NETWORK
+        # Policy Network - Actor Critic network for hidden state, policy and state value
         self._network = ActorCriticRNN(self._env.action_space(self._env_params).n, config=self._config)
         
 
     def init_state(self, rng):
+        """Initialise agent state using PRNG key"""
         def linear_schedule(count):
             # frac = (
             #     1.0
@@ -130,7 +179,10 @@ class PPOAgent():
             frac = 1.0
             return self._config["LR"] * frac
         
+        # Split provided PRNG key
         rng, _rng = jax.random.split(rng)
+        
+        # INIT POLICY NETWORK
         init_x = (
             jnp.zeros(
                 (1, self._config["NUM_ENVS"], *self._env.observation_space(self._env_params).shape)
@@ -139,6 +191,8 @@ class PPOAgent():
         )
         init_hstate = ScannedRNN.initialize_carry(self._config["NUM_ENVS"], 128)
         network_params = self._network.init(_rng, init_hstate, init_x)
+        
+        # Define optimizers for regular and annealing sequence config
         if self._config["ANNEAL_LR"]:
             tx = optax.chain(
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
@@ -149,18 +203,24 @@ class PPOAgent():
                 optax.clip_by_global_norm(self._config["MAX_GRAD_NORM"]),
                 optax.adam(self._config["LR"], eps=1e-5),
             )
+            
+        # Define training state for policy network
         train_state = TrainState.create(
             apply_fn=self._network.apply,
             params=network_params,
             tx=tx,
         )
 
-        # INIT ENV
+        # INIT ENV - Reset environment to initial state specified by PRNG key
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, self._config["NUM_ENVS"])
         obsv, env_state = jax.vmap(self._env.reset, in_axes=(0, None))(reset_rng, self._env_params)
+        
+        # TODO Remove? This line seems redundant - init_state defined earlier
+        # is never modified?
         init_hstate = ScannedRNN.initialize_carry(self._config["NUM_ENVS"], 128)
 
+        # Initialise runner state and return
         rng, _rng = jax.random.split(rng)
         runner_state = (
             train_state,
@@ -174,14 +234,18 @@ class PPOAgent():
         return runner_state
     
     def _update_step(self, runner_state, unused):
+        """Main training loop"""
         # COLLECT TRAJECTORIES
         def _env_step(runner_state, unused):
+            """Defines agent interaction with environment for a single timestep"""
             train_state, env_state, last_obs, last_done, hstate, rng = runner_state
-            rng, _rng = jax.random.split(rng)
 
-            # SELECT ACTION
+            # Obtain policy and state value from policy (Actor Critic) network
             ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
             hstate, pi, value = self._network.apply(train_state.params, hstate, ac_in)
+            
+            # SELECT ACTION
+            rng, _rng = jax.random.split(rng)
             action = pi.sample(seed=_rng)
             log_prob = pi.log_prob(action)
             value, action, log_prob = (
@@ -190,18 +254,23 @@ class PPOAgent():
                 log_prob.squeeze(0),
             )
 
-            # STEP ENV
+            # PERFORM STEP IN ENV
             rng, _rng = jax.random.split(rng)
             rng_step = jax.random.split(_rng, self._config["NUM_ENVS"])
             obsv, env_state, reward, done, info = jax.vmap(
                 self._env.step, in_axes=(0, 0, 0, None)
             )(rng_step, env_state, action, self._env_params)
+            
+            # Update transition information
             transition = Transition(
                 done, action, value, reward, log_prob, last_obs, info
             )
+            
+            # Step once and update state
             runner_state = (train_state, env_state, obsv, done, hstate, rng)
             return runner_state, transition
 
+        # Obtain trajectories
         initial_hstate = runner_state[-2]
         runner_state, traj_batch = jax.lax.scan(
             _env_step, runner_state, None, self._config["NUM_STEPS"]
@@ -215,7 +284,18 @@ class PPOAgent():
         last_val = jnp.where(last_done, jnp.zeros_like(last_val), last_val)
 
         def _calculate_gae(traj_batch, last_val):
+            """
+            Generalized Advantage Estimation
+
+            Args:
+                traj_batch: Batch of sampled trajectories
+                last_val: Value for last observation obtained earlier
+                
+            Return:
+                Calculated advantages and target values (advantages + values)
+            """
             def _get_advantages(gae_and_next_value, transition):
+                """Advantage Calculation"""
                 gae, next_value = gae_and_next_value
                 done, value, reward = (
                     transition.done,
@@ -229,6 +309,7 @@ class PPOAgent():
                 )
                 return (gae, value), gae
 
+            # Calculate advantages and combine with value predictions
             _, advantages = jax.lax.scan(
                 _get_advantages,
                 (jnp.zeros_like(last_val), last_val),
@@ -238,21 +319,53 @@ class PPOAgent():
             )
             return advantages, advantages + traj_batch.value
 
+        # Combination with value predictions provide target values for value fn
         advantages, targets = _calculate_gae(traj_batch, last_val)
 
         # UPDATE NETWORK
         def _update_epoch(update_state, unused):
+            """
+            Update actor models with minibatch updates
+
+            Args:
+                update_state: Contains information for model updates
+            """
             def _update_minbatch(train_state, batch_info):
+                """
+                Use minibatch to perform updates to agent models
+
+                Args:
+                    train_states: TODO
+                    batch_info: TODO
+
+                Returns:
+                    Training states, policy loss, world model loss, and
+                    distance metric between online and target model params
+                """
                 init_hstate, traj_batch, advantages, targets = batch_info
 
                 def _loss_fn(params, init_hstate, traj_batch, gae, targets):
+                    """
+                    Calculate Agent Loss
+
+                    Args:
+                        params: Policy network parameters
+                        init_hstate: Hidden state of RNN
+                        traj_batch: Sampled trajectories batch
+                        gae: Advantages from _calculate_gae()
+                        targets: Targets from _calculate_gae()
+
+                    Returns:
+                        Total loss - weighted sum of actor, value and entropy losses
+                    """
                     # RERUN NETWORK
                     _, pi, value = self._network.apply(
                         params, init_hstate[0], (traj_batch.obs, traj_batch.done)
                     )
                     log_prob = pi.log_prob(traj_batch.action)
 
-                    # CALCULATE VALUE LOSS
+                    # CALCULATE VALUE LOSS - Ensure value prediction is clipped 
+                    # to prevent large updates
                     value_pred_clipped = traj_batch.value + (
                         value - traj_batch.value
                     ).clip(-self._config["CLIP_EPS"], self._config["CLIP_EPS"])
@@ -262,7 +375,8 @@ class PPOAgent():
                         0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
                     )
 
-                    # CALCULATE ACTOR LOSS
+                    # CALCULATE ACTOR LOSS - Ensure update is clipped
+                    # Ratio to calculate current vs old policy deviation
                     ratio = jnp.exp(log_prob - traj_batch.log_prob)
                     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
                     loss_actor1 = ratio * gae
@@ -276,8 +390,11 @@ class PPOAgent():
                     )
                     loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
                     loss_actor = loss_actor.mean()
+                    
+                    # Calculate entropy loss - penalize deterministic policies
                     entropy = pi.entropy().mean()
 
+                    # Calculate total loss - weighted sum of actor, entropy losses
                     total_loss = (
                         loss_actor
                         + self._config["VF_COEF"] * value_loss
@@ -285,6 +402,7 @@ class PPOAgent():
                     )
                     return total_loss, (value_loss, loss_actor, entropy)
 
+                # UPDATE THE POLICY - Compute gradients w.r.t policy parameters
                 grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
                 total_loss, grads = grad_fn(
                     train_state.params, init_hstate, traj_batch, advantages, targets
@@ -292,6 +410,7 @@ class PPOAgent():
                 train_state = train_state.apply_gradients(grads=grads)
                 return train_state, total_loss
 
+            # Extract and update information from update state
             (
                 train_state,
                 init_hstate,
@@ -301,27 +420,21 @@ class PPOAgent():
                 rng,
             ) = update_state
 
+            # Reshape and divide trajectories into minibatches
             rng, _rng = jax.random.split(rng)
             permutation = jax.random.permutation(_rng, self._config["NUM_ENVS"])
             batch = (init_hstate, traj_batch, advantages, targets)
-
             shuffled_batch = jax.tree_util.tree_map(
                 lambda x: jnp.take(x, permutation, axis=1), batch
             )
-
             minibatches = jax.tree_util.tree_map(
                 lambda x: jnp.swapaxes(
-                    jnp.reshape(
-                        x,
-                        [x.shape[0], self._config["NUM_MINIBATCHES"], -1]
-                        + list(x.shape[2:]),
-                    ),
-                    1,
-                    0,
-                ),
+                    jnp.reshape(x, [x.shape[0], self._config["NUM_MINIBATCHES"], -1] 
+                                + list(x.shape[2:]),), 1, 0,),
                 shuffled_batch,
             )
 
+            # Apply update minibatch function to every minibatch
             train_state, total_loss = jax.lax.scan(
                 _update_minbatch, train_state, minibatches
             )
@@ -335,6 +448,7 @@ class PPOAgent():
             )
             return update_state, total_loss
 
+        # Create update state and perform actor models update
         init_hstate = initial_hstate[None, :]  # TBH
         update_state = (
             train_state,
@@ -347,9 +461,13 @@ class PPOAgent():
         update_state, loss_info = jax.lax.scan(
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )
+        
+        # Obtain current training state, extract metrics after update conclusion
         train_state = update_state[0]
         metric = traj_batch.info
         rng = update_state[-1]
+        
+        # Debugging functionality - log metrics for each step
         if self._config.get("DEBUG"):
 
             def callback(info):
@@ -366,10 +484,23 @@ class PPOAgent():
 
             jax.debug.callback(callback, metric)
 
+        # Update runner state with newest information and return
         runner_state = (train_state, env_state, last_obs, last_done, hstate, rng)
         return runner_state, metric["returned_episode_returns"]
 
     def run(self, runner_state, external_rewards=True, steps=10000, evaluation=False):
+        """
+        Execute agent training loop
+
+        Args:
+            runner_state: State of agent at current timestep
+            external_rewards: Whether to use external rewards (default: {True})
+            steps: Number of training steps (default: {10000})
+            evaluation: Whether the following is an evaluation run (default: {False})
+
+        Returns:
+            The final state of the agent
+        """
         # TRAIN LOOP
         # 5e5 steps
         if not external_rewards:

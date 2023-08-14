@@ -126,7 +126,7 @@ class PPOAgent():
             frac = 1.0
             return self._config["LR"] * frac
 
-        # Split probided PRNG key
+        # Split provided PRNG key
         rng, _rng = jax.random.split(rng)
         
         # INIT POLICY NETWORK
@@ -194,6 +194,7 @@ class PPOAgent():
             runner_state = (train_state, env_state, obsv, rng)
             return runner_state, transition
 
+        # Obtain trajectories
         runner_state, traj_batch = jax.lax.scan(
             _env_step, runner_state, None, self._config["NUM_STEPS"]
         )
@@ -370,7 +371,7 @@ class PPOAgent():
             _update_epoch, update_state, None, self._config["UPDATE_EPOCHS"]
         )
         
-        # # Obtain current training state, extract metrics after update conclusion
+        # Obtain current training state, extract metrics after update conclusion
         train_state = update_state[0]
         metric = traj_batch.info
         rng = update_state[-1]
