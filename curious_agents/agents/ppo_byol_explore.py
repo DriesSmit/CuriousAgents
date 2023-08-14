@@ -199,7 +199,7 @@ class WorldModel(nn.Module):
         return layer_out
 
 class Transition(NamedTuple):
-    """Contains environment for a transition information"""
+    """Contains information for an environment transition"""
     done: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray
@@ -583,7 +583,7 @@ class PPOAgent:
                     )
 
                     # CALCULATE ACTOR LOSS - Ensure update is clipped
-                    # ratio to calculate current vs old policy deviation
+                    # Ratio to calculate current vs old policy deviation
                     ratio = jnp.exp(log_prob - traj_batch.log_prob)
                     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
                     actor_loss1 = ratio * gae
