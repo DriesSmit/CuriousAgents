@@ -193,9 +193,7 @@ class WorldModel(nn.Module):
         layer_out = activation(layer_out)
         layer_out = nn.Dense(
             latent_in.shape[-1], kernel_init=orthogonal(1.0), bias_init=constant(0.0)
-        )
-        (layer_out)
-
+        )(layer_out)
         return layer_out
 
 class Transition(NamedTuple):
