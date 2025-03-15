@@ -178,7 +178,7 @@ class WorldModel(nn.Module):
         else:
             activation = nn.tanh
 
-        # One-hot encode the action and concatentate with latent representation
+        # One-hot encode the action and concatenate with latent representation
         one_hot_action = jax.nn.one_hot(action, self.action_dim)
         inp = jnp.concatenate([latent_in, one_hot_action], axis=-1)
 
